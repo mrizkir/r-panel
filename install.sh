@@ -18,6 +18,20 @@ fi
 
 set -e  # Exit on error
 
+# Error handler
+error_exit() {
+    local line_no=$1
+    echo ""
+    log_error "Installation failed at line $line_no"
+    log_error "Check log file for details: $LOG_FILE"
+    log_error "Last 20 lines of log:"
+    tail -20 "$LOG_FILE" 2>/dev/null || echo "Log file not found"
+    exit 1
+}
+
+# Set error trap
+trap 'error_exit $LINENO' ERR
+
 # Set non-interactive mode to prevent dialog prompts
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
@@ -71,8 +85,13 @@ show_progress() {
     for ((i=0; i<empty-1; i++)); do bar+=" "; done
     bar+="]"
     
-    # Print progress bar
+    # Print progress bar with carriage return
     printf "\r${CYAN}Progress:${NC} %s ${GREEN}%3d%%${NC} - %s" "$bar" "$percent" "$1"
+    
+    # Flush output
+    if command -v sync &> /dev/null; then
+        sync
+    fi
     
     if [ "$CURRENT_STEP" -eq "$TOTAL_STEPS" ]; then
         echo ""
@@ -90,9 +109,17 @@ execute() {
     if [ "$VERBOSE_MODE" = true ]; then
         echo ""
         log_info "$description"
-        "$@" 2>&1 | tee -a "$LOG_FILE"
+        if ! "$@" 2>&1 | tee -a "$LOG_FILE"; then
+            log_error "Failed: $description"
+            return 1
+        fi
     else
-        "$@" >> "$LOG_FILE" 2>&1
+        if ! "$@" >> "$LOG_FILE" 2>&1; then
+            echo ""
+            log_error "Failed: $description"
+            log_error "Check log: $LOG_FILE"
+            return 1
+        fi
     fi
 }
 
@@ -142,7 +169,9 @@ detect_os() {
 
 # Disable interactive prompts
 disable_prompts() {
-    if [ "$VERBOSE_MODE" = true ]; then
+    if [ "$VERBOSE_MODE" = false ]; then
+        echo "Configuring non-interactive mode..." >> "$LOG_FILE"
+    elif [ "$VERBOSE_MODE" = true ]; then
         log_info "Configuring non-interactive mode..."
     fi
     
@@ -163,6 +192,8 @@ EOF
     
     if [ "$VERBOSE_MODE" = true ]; then
         log_success "Non-interactive mode configured"
+    else
+        echo "Non-interactive mode configured" >> "$LOG_FILE"
     fi
 }
 
@@ -894,6 +925,10 @@ display_info() {
 main() {
     clear
     
+    # Create log file immediately
+    touch "$LOG_FILE"
+    echo "R-Panel Installation Started at $(date)" > "$LOG_FILE"
+    
     if [ "$VERBOSE_MODE" = false ]; then
         echo "=============================================="
         echo "  R-Panel Installation Script"
@@ -916,6 +951,13 @@ main() {
     
     check_root
     detect_os
+    
+    # Show initial progress if in quiet mode
+    if [ "$VERBOSE_MODE" = false ]; then
+        show_progress "Initializing installation..."
+        sleep 0.5
+    fi
+    
     disable_prompts
     
     # Installation steps
