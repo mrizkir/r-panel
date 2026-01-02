@@ -25,7 +25,7 @@
 
 **R-Panel** is a minimalist, modern server management panel designed for **Ubuntu servers (minimum version 22.04 LTS)**. Perfect for managing web servers, PHP-FPM pools, Nginx virtual hosts, and MySQL databases without the overhead of heavy control panels.
 
-Born from real-world production experience managing educational platforms (Moodle e-learning systems), R-Panel provides an intuitive web interface for server administration tasks that typically require SSH and command-line expertise.
+Born from real-world production experience managing servers, R-Panel provides an intuitive web interface for server administration tasks that typically require SSH and command-line expertise.
 
 **Why R-Panel?**
 - 🎯 **Ubuntu-focused** - Optimized for Ubuntu 22.04 LTS and higher
