@@ -23,12 +23,12 @@
 
 ## 📋 About
 
-**R-Panel** is a minimalist, modern server management panel designed specifically for **Ubuntu 22.04 LTS** minimal installations. Perfect for managing web servers, PHP-FPM pools, Nginx virtual hosts, and MySQL databases without the overhead of heavy control panels.
+**R-Panel** is a minimalist, modern server management panel designed for **Ubuntu servers (minimum version 22.04 LTS)**. Perfect for managing web servers, PHP-FPM pools, Nginx virtual hosts, and MySQL databases without the overhead of heavy control panels.
 
 Born from real-world production experience managing educational platforms (Moodle e-learning systems), R-Panel provides an intuitive web interface for server administration tasks that typically require SSH and command-line expertise.
 
 **Why R-Panel?**
-- 🎯 **Ubuntu-focused** - Optimized for Ubuntu 22.04 LTS minimal
+- 🎯 **Ubuntu-focused** - Optimized for Ubuntu 22.04 LTS and higher
 - 🪶 **Lightweight** - Minimal resource usage, no bloat
 - 🚀 **Fast** - Built with Go for maximum performance
 - 🔒 **Security-first** - Production-hardened security practices
@@ -116,7 +116,7 @@ Born from real-world production experience managing educational platforms (Moodl
 - **[Vite](https://vitejs.dev/)** - Fast build tool with minification
 
 ### System Requirements
-- **OS**: Ubuntu 22.04 LTS (minimal installation)
+- **OS**: Ubuntu Server 22.04 LTS or higher
 - **RAM**: 512MB minimum (1GB recommended)
 - **Disk**: 500MB for R-Panel + space for data
 - **Services**: Nginx, PHP-FPM, MySQL/MariaDB (optional)
@@ -127,7 +127,7 @@ Born from real-world production experience managing educational platforms (Moodl
 
 ### Prerequisites
 ```bash
-# Fresh Ubuntu 22.04 LTS minimal server
+# Ubuntu Server 22.04 LTS or higher
 # Update system first
 sudo apt update && sudo apt upgrade -y
 
@@ -416,7 +416,7 @@ See [LICENSE](LICENSE) file for details.
 
 ## ⚠️ Disclaimer
 
-R-Panel is designed for **Ubuntu 22.04 LTS minimal** installations. While it may work on other Debian-based systems, official support is limited to Ubuntu 22.04 LTS.
+R-Panel is designed for **Ubuntu Server 22.04 LTS or higher**. While it may work on other Debian-based systems, official support is limited to Ubuntu 22.04 LTS and newer versions.
 
 Always test in a non-production environment first!
 
