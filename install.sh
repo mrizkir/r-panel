@@ -2,11 +2,24 @@
 
 #==============================================================================
 # R-Panel Installation Script
-# Author: Generated for Mochammad Rizki Romdoni
 # Description: Complete installation script for R-Panel hosting control panel
+# For international users
 #==============================================================================
 
+# Auto re-execute with bash if not running with bash
+if [ -z "$BASH_VERSION" ]; then
+    exec bash "$0" "$@"
+fi
+
 set -e  # Exit on error
+
+# Set non-interactive mode to prevent dialog prompts
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
 
 # Color codes for output
 RED='\033[0;31m'
@@ -35,7 +48,7 @@ log_error() {
 # Check if running as root
 check_root() {
     if [ "$EUID" -ne 0 ]; then
-        log_error "Script ini harus dijalankan sebagai root"
+        log_error "This script must be run as root"
         exit 1
     fi
 }
@@ -53,17 +66,45 @@ detect_os() {
     fi
 
     # Check if OS is supported
-    if [[ "$OS" != "ubuntu" ]] && [[ "$OS" != "debian" ]]; then
-        log_error "OS tidak didukung. Hanya Ubuntu dan Debian yang didukung."
+    if [ "$OS" != "ubuntu" ] && [ "$OS" != "debian" ]; then
+        log_error "Unsupported OS. Only Ubuntu and Debian are supported."
         exit 1
     fi
+}
+
+# Disable interactive prompts
+disable_prompts() {
+    log_info "Configuring non-interactive mode..."
+    
+    # Configure needrestart to automatically restart services
+    if [ -f /etc/needrestart/needrestart.conf ]; then
+        sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf
+    fi
+    
+    # Create needrestart config if not exists
+    mkdir -p /etc/needrestart
+    cat > /etc/needrestart/conf.d/no-prompt.conf <<'EOF'
+# Restart services automatically without asking
+$nrconf{restart} = 'a';
+EOF
+    
+    # Configure debconf for non-interactive mode
+    echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
+    
+    log_success "Non-interactive mode configured"
 }
 
 # Update system
 update_system() {
     log_info "Updating system packages..."
+    
+    # Configure apt to not ask questions
+    echo 'libc6 libraries/restart-without-asking boolean true' | debconf-set-selections
+    
     apt-get update -y
-    apt-get upgrade -y
+    apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+    apt-get dist-upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+    
     log_success "System updated successfully"
 }
 
@@ -71,6 +112,8 @@ update_system() {
 install_utilities() {
     log_info "Installing basic utilities..."
     apt-get install -y \
+        debconf-utils \
+        apt-transport-https \
         software-properties-common \
         curl \
         wget \
@@ -114,15 +157,27 @@ install_nginx() {
 install_php() {
     log_info "Installing PHP and PHP-FPM..."
     
-    # Add PHP repository for latest version
-    if [[ "$OS" == "ubuntu" ]]; then
+    # PHP version to install
+    PHP_VERSION="8.2"
+    
+    # Add PHP repository based on OS
+    if [ "$OS" = "ubuntu" ]; then
+        log_info "Adding Ondrej PHP repository for Ubuntu..."
         add-apt-repository -y ppa:ondrej/php
+        apt-get update -y
+    elif [ "$OS" = "debian" ]; then
+        log_info "Adding Sury PHP repository for Debian..."
+        
+        # Add Sury repository key
+        curl -fsSL https://packages.sury.org/php/apt.gpg -o /etc/apt/trusted.gpg.d/php.gpg
+        
+        # Add repository
+        echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php.list
+        
         apt-get update -y
     fi
     
-    # Install PHP 8.2 (you can change version as needed)
-    PHP_VERSION="8.2"
-    
+    # Install PHP packages
     apt-get install -y \
         php${PHP_VERSION} \
         php${PHP_VERSION}-fpm \
@@ -135,7 +190,6 @@ install_php() {
         php${PHP_VERSION}-curl \
         php${PHP_VERSION}-xml \
         php${PHP_VERSION}-bcmath \
-        php${PHP_VERSION}-json \
         php${PHP_VERSION}-intl \
         php${PHP_VERSION}-soap \
         php${PHP_VERSION}-imap \
@@ -160,7 +214,7 @@ install_mariadb() {
     systemctl start mariadb
     
     log_success "MariaDB installed successfully"
-    log_warning "Jangan lupa jalankan: mysql_secure_installation"
+    log_warning "Don't forget to run: mysql_secure_installation"
 }
 
 # Install Redis (optional but recommended for caching)
@@ -353,11 +407,11 @@ optimize_php_fpm() {
     log_success "PHP-FPM optimized"
 }
 
-# Create swap if not exists (untuk mencegah memory issues seperti yang pernah dialami)
+# Create swap if not exists (to prevent memory issues)
 create_swap() {
     log_info "Checking swap memory..."
     
-    if [ $(swapon --show | wc -l) -eq 0 ]; then
+    if [ "$(swapon --show | wc -l)" -eq 0 ]; then
         log_warning "No swap detected. Creating 2GB swap file..."
         
         fallocate -l 2G /swapfile
@@ -420,6 +474,7 @@ main() {
     
     check_root
     detect_os
+    disable_prompts
     
     # Installation steps
     update_system
@@ -444,7 +499,7 @@ main() {
     
     log_success "Installation completed successfully!"
     echo ""
-    log_warning "PENTING: Reboot server untuk memastikan semua konfigurasi aktif"
+    log_warning "IMPORTANT: Reboot the server to ensure all configurations are active"
     echo ""
 }
 
