@@ -4,6 +4,11 @@
 # R-Panel Installation Script
 # Description: Complete installation script for R-Panel hosting control panel
 # For international users
+#
+# Usage:
+#   ./install.sh           # Quiet mode with progress bar (default)
+#   ./install.sh --verbose # Show all installation output
+#   ./install.sh --quiet   # Same as default, quiet with progress
 #==============================================================================
 
 # Auto re-execute with bash if not running with bash
@@ -17,32 +22,95 @@ set -e  # Exit on error
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
-export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=a
-export NEEDRESTART_SUSPEND=1
+export COMPOSER_ALLOW_SUPERUSER=1
+
+# Parse arguments
+VERBOSE_MODE=false
+for arg in "$@"; do
+    case $arg in
+        --verbose|-v)
+            VERBOSE_MODE=true
+            shift
+            ;;
+        --quiet|-q)
+            VERBOSE_MODE=false
+            shift
+            ;;
+    esac
+done
+
+# Installation log file
+LOG_FILE="/tmp/r-panel-install-$(date +%Y%m%d_%H%M%S).log"
 
 # Color codes for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+
+# Progress tracking
+TOTAL_STEPS=15
+CURRENT_STEP=0
+
+# Progress bar function
+show_progress() {
+    if [ "$VERBOSE_MODE" = true ]; then
+        return
+    fi
+    
+    local percent=$((CURRENT_STEP * 100 / TOTAL_STEPS))
+    local filled=$((CURRENT_STEP * 50 / TOTAL_STEPS))
+    local empty=$((50 - filled))
+    
+    # Build progress bar
+    local bar="["
+    for ((i=0; i<filled; i++)); do bar+="="; done
+    if [ $filled -lt 50 ]; then bar+=">"; fi
+    for ((i=0; i<empty-1; i++)); do bar+=" "; done
+    bar+="]"
+    
+    # Print progress bar
+    printf "\r${CYAN}Progress:${NC} %s ${GREEN}%3d%%${NC} - %s" "$bar" "$percent" "$1"
+    
+    if [ "$CURRENT_STEP" -eq "$TOTAL_STEPS" ]; then
+        echo ""
+    fi
+}
+
+# Execute command based on verbose mode
+execute() {
+    local description="$1"
+    shift
+    
+    ((CURRENT_STEP++))
+    show_progress "$description"
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        echo ""
+        log_info "$description"
+        "$@" 2>&1 | tee -a "$LOG_FILE"
+    else
+        "$@" >> "$LOG_FILE" 2>&1
+    fi
+}
 
 # Logging functions
 log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+    echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE"
 }
 
 log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+    echo -e "${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE"
 }
 
 log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
+    echo -e "${YELLOW}[WARNING]${NC} $1" | tee -a "$LOG_FILE"
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE"
 }
 
 # Check if running as root
@@ -74,44 +142,47 @@ detect_os() {
 
 # Disable interactive prompts
 disable_prompts() {
-    log_info "Configuring non-interactive mode..."
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Configuring non-interactive mode..."
+    fi
     
     # Configure needrestart to automatically restart services
     if [ -f /etc/needrestart/needrestart.conf ]; then
-        sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf
+        sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf 2>> "$LOG_FILE"
     fi
     
     # Create needrestart config if not exists
-    mkdir -p /etc/needrestart
+    mkdir -p /etc/needrestart >> "$LOG_FILE" 2>&1
     cat > /etc/needrestart/conf.d/no-prompt.conf <<'EOF'
 # Restart services automatically without asking
 $nrconf{restart} = 'a';
 EOF
     
     # Configure debconf for non-interactive mode
-    echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
+    echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections >> "$LOG_FILE" 2>&1
     
-    log_success "Non-interactive mode configured"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Non-interactive mode configured"
+    fi
 }
 
 # Update system
 update_system() {
-    log_info "Updating system packages..."
-    
     # Configure apt to not ask questions
-    echo 'libc6 libraries/restart-without-asking boolean true' | debconf-set-selections
+    echo 'libc6 libraries/restart-without-asking boolean true' | debconf-set-selections >> "$LOG_FILE" 2>&1
     
-    apt-get update -y
-    apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
-    apt-get dist-upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+    execute "Updating system packages" apt-get update -y
+    execute "Upgrading system packages" apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+    execute "Upgrading distribution packages" apt-get dist-upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
     
-    log_success "System updated successfully"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "System updated successfully"
+    fi
 }
 
 # Install basic utilities
 install_utilities() {
-    log_info "Installing basic utilities..."
-    apt-get install -y \
+    execute "Installing basic utilities" apt-get install -y \
         debconf-utils \
         apt-transport-https \
         software-properties-common \
@@ -120,6 +191,7 @@ install_utilities() {
         git \
         unzip \
         zip \
+        rsync \
         htop \
         nano \
         vim \
@@ -131,54 +203,59 @@ install_utilities() {
         ca-certificates \
         gnupg \
         lsb-release
-    log_success "Basic utilities installed"
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Basic utilities installed"
+    fi
 }
 
 # Install Nginx
 install_nginx() {
-    log_info "Installing Nginx..."
-    
-    apt-get install -y nginx
+    execute "Installing Nginx" apt-get install -y nginx
     
     # Enable and start Nginx
-    systemctl enable nginx
-    systemctl start nginx
+    systemctl enable nginx >> "$LOG_FILE" 2>&1
+    systemctl start nginx >> "$LOG_FILE" 2>&1
     
     # Create default directories
-    mkdir -p /var/www/html
-    mkdir -p /etc/nginx/sites-available
-    mkdir -p /etc/nginx/sites-enabled
-    mkdir -p /etc/nginx/conf.d
+    mkdir -p /var/www/html >> "$LOG_FILE" 2>&1
+    mkdir -p /etc/nginx/sites-available >> "$LOG_FILE" 2>&1
+    mkdir -p /etc/nginx/sites-enabled >> "$LOG_FILE" 2>&1
+    mkdir -p /etc/nginx/conf.d >> "$LOG_FILE" 2>&1
     
-    log_success "Nginx installed successfully"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Nginx installed successfully"
+    fi
 }
 
 # Install PHP and PHP-FPM
 install_php() {
-    log_info "Installing PHP and PHP-FPM..."
-    
     # PHP version to install
     PHP_VERSION="8.2"
     
     # Add PHP repository based on OS
     if [ "$OS" = "ubuntu" ]; then
-        log_info "Adding Ondrej PHP repository for Ubuntu..."
-        add-apt-repository -y ppa:ondrej/php
-        apt-get update -y
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Adding Ondrej PHP repository for Ubuntu..."
+        fi
+        add-apt-repository -y ppa:ondrej/php >> "$LOG_FILE" 2>&1
+        apt-get update -y >> "$LOG_FILE" 2>&1
     elif [ "$OS" = "debian" ]; then
-        log_info "Adding Sury PHP repository for Debian..."
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Adding Sury PHP repository for Debian..."
+        fi
         
         # Add Sury repository key
-        curl -fsSL https://packages.sury.org/php/apt.gpg -o /etc/apt/trusted.gpg.d/php.gpg
+        curl -fsSL https://packages.sury.org/php/apt.gpg -o /etc/apt/trusted.gpg.d/php.gpg 2>> "$LOG_FILE"
         
         # Add repository
         echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php.list
         
-        apt-get update -y
+        apt-get update -y >> "$LOG_FILE" 2>&1
     fi
     
     # Install PHP packages
-    apt-get install -y \
+    execute "Installing PHP ${PHP_VERSION} and extensions" apt-get install -y \
         php${PHP_VERSION} \
         php${PHP_VERSION}-fpm \
         php${PHP_VERSION}-cli \
@@ -197,92 +274,148 @@ install_php() {
         php${PHP_VERSION}-readline
     
     # Enable and start PHP-FPM
-    systemctl enable php${PHP_VERSION}-fpm
-    systemctl start php${PHP_VERSION}-fpm
+    systemctl enable php${PHP_VERSION}-fpm >> "$LOG_FILE" 2>&1
+    systemctl start php${PHP_VERSION}-fpm >> "$LOG_FILE" 2>&1
     
-    log_success "PHP ${PHP_VERSION} installed successfully"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "PHP ${PHP_VERSION} installed successfully"
+    fi
 }
 
 # Install MariaDB
 install_mariadb() {
-    log_info "Installing MariaDB..."
-    
-    apt-get install -y mariadb-server mariadb-client
+    execute "Installing MariaDB" apt-get install -y mariadb-server mariadb-client
     
     # Enable and start MariaDB
-    systemctl enable mariadb
-    systemctl start mariadb
+    systemctl enable mariadb >> "$LOG_FILE" 2>&1
+    systemctl start mariadb >> "$LOG_FILE" 2>&1
     
-    log_success "MariaDB installed successfully"
-    log_warning "Don't forget to run: mysql_secure_installation"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "MariaDB installed successfully"
+        log_warning "Don't forget to run: mysql_secure_installation"
+    fi
 }
 
 # Install Redis (optional but recommended for caching)
 install_redis() {
-    log_info "Installing Redis..."
-    
-    apt-get install -y redis-server
+    execute "Installing Redis" apt-get install -y redis-server
     
     # Enable and start Redis
-    systemctl enable redis-server
-    systemctl start redis-server
+    systemctl enable redis-server >> "$LOG_FILE" 2>&1
+    systemctl start redis-server >> "$LOG_FILE" 2>&1
     
-    log_success "Redis installed successfully"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Redis installed successfully"
+    fi
 }
 
 # Install Node.js and npm (for frontend assets)
 install_nodejs() {
-    log_info "Installing Node.js and npm..."
-    
     # Install NodeSource repository for latest LTS
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-    apt-get install -y nodejs
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Adding NodeSource repository..."
+    fi
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - >> "$LOG_FILE" 2>&1
+    
+    execute "Installing Node.js and npm" apt-get install -y nodejs
     
     # Install Yarn
-    npm install -g yarn
+    npm install -g yarn >> "$LOG_FILE" 2>&1
     
-    log_success "Node.js $(node -v) and npm $(npm -v) installed successfully"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Node.js $(node -v) and npm $(npm -v) installed successfully"
+    fi
+}
+
+# Install Go
+install_go() {
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Installing Go..."
+    fi
+    
+    # Go version to install
+    GO_VERSION="1.25.5"
+    
+    # Download and install Go
+    cd /tmp
+    wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz >> "$LOG_FILE" 2>&1
+    
+    # Remove old Go installation if exists
+    rm -rf /usr/local/go >> "$LOG_FILE" 2>&1
+    
+    # Extract new Go
+    tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz >> "$LOG_FILE" 2>&1
+    
+    # Add Go to PATH
+    if ! grep -q "/usr/local/go/bin" /etc/profile; then
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
+    fi
+    
+    # Set for current session
+    export PATH=$PATH:/usr/local/go/bin
+    
+    # Cleanup
+    rm -f go${GO_VERSION}.linux-amd64.tar.gz >> "$LOG_FILE" 2>&1
+    
+    cd - >> "$LOG_FILE" 2>&1
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Go $(/usr/local/go/bin/go version | cut -d' ' -f3) installed successfully"
+    fi
 }
 
 # Install Composer (PHP package manager)
 install_composer() {
-    log_info "Installing Composer..."
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Installing Composer..."
+    fi
     
-    EXPECTED_CHECKSUM="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
-    php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
-    ACTUAL_CHECKSUM="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
+    EXPECTED_CHECKSUM="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");' 2>/dev/null)"
+    php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" >> "$LOG_FILE" 2>&1
+    ACTUAL_CHECKSUM="$(php -r "echo hash_file('sha384', 'composer-setup.php');" 2>/dev/null)"
 
     if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
         log_error "Invalid Composer installer checksum"
-        rm composer-setup.php
+        rm -f composer-setup.php
         exit 1
     fi
 
-    php composer-setup.php --quiet --install-dir=/usr/local/bin --filename=composer
-    rm composer-setup.php
+    # Install Composer - auto-answer "yes" to root warning
+    echo "yes" | php composer-setup.php --quiet --install-dir=/usr/local/bin --filename=composer >> "$LOG_FILE" 2>&1
     
-    log_success "Composer installed successfully"
+    rm -f composer-setup.php >> "$LOG_FILE" 2>&1
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Composer installed successfully"
+    fi
 }
 
 # Configure firewall
 configure_firewall() {
-    log_info "Configuring UFW firewall..."
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Configuring UFW firewall..."
+    fi
     
     # Allow SSH, HTTP, HTTPS
-    ufw allow 22/tcp
-    ufw allow 80/tcp
-    ufw allow 443/tcp
-    ufw allow 3306/tcp  # MySQL (optional, for remote access)
+    ufw allow 22/tcp >> "$LOG_FILE" 2>&1
+    ufw allow 80/tcp >> "$LOG_FILE" 2>&1
+    ufw allow 443/tcp >> "$LOG_FILE" 2>&1
+    ufw allow 8080/tcp >> "$LOG_FILE" 2>&1  # R-Panel port
+    ufw allow 3306/tcp >> "$LOG_FILE" 2>&1  # MySQL (optional, for remote access)
     
     # Enable firewall
-    echo "y" | ufw enable
+    echo "y" | ufw enable >> "$LOG_FILE" 2>&1
     
-    log_success "Firewall configured successfully"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Firewall configured successfully"
+    fi
 }
 
 # Configure Fail2Ban
 configure_fail2ban() {
-    log_info "Configuring Fail2Ban..."
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Configuring Fail2Ban..."
+    fi
     
     # Create local jail configuration
     cat > /etc/fail2ban/jail.local <<EOF
@@ -307,65 +440,69 @@ port = http,https
 logpath = /var/log/nginx/access.log
 EOF
 
-    systemctl enable fail2ban
-    systemctl restart fail2ban
+    systemctl enable fail2ban >> "$LOG_FILE" 2>&1
+    systemctl restart fail2ban >> "$LOG_FILE" 2>&1
     
-    log_success "Fail2Ban configured successfully"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Fail2Ban configured successfully"
+    fi
 }
 
 # Create R-Panel directory structure
 create_rpanel_structure() {
-    log_info "Creating R-Panel directory structure..."
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Creating R-Panel directory structure..."
+    fi
     
     # Main directories
-    mkdir -p /opt/r-panel
-    mkdir -p /opt/r-panel/bin
-    mkdir -p /opt/r-panel/config
-    mkdir -p /opt/r-panel/logs
-    mkdir -p /opt/r-panel/temp
-    mkdir -p /opt/r-panel/backups
+    mkdir -p /opt/r-panel >> "$LOG_FILE" 2>&1
+    mkdir -p /opt/r-panel/bin >> "$LOG_FILE" 2>&1
+    mkdir -p /opt/r-panel/config >> "$LOG_FILE" 2>&1
+    mkdir -p /opt/r-panel/logs >> "$LOG_FILE" 2>&1
+    mkdir -p /opt/r-panel/temp >> "$LOG_FILE" 2>&1
+    mkdir -p /opt/r-panel/backups >> "$LOG_FILE" 2>&1
     
     # Web directories
-    mkdir -p /var/www/r-panel
-    mkdir -p /var/www/r-panel/public
-    mkdir -p /var/www/r-panel/storage
+    mkdir -p /var/www/r-panel >> "$LOG_FILE" 2>&1
+    mkdir -p /var/www/r-panel/public >> "$LOG_FILE" 2>&1
+    mkdir -p /var/www/r-panel/storage >> "$LOG_FILE" 2>&1
     
     # User websites directory
-    mkdir -p /var/www/vhosts
+    mkdir -p /var/www/vhosts >> "$LOG_FILE" 2>&1
     
     # Set permissions
-    chown -R www-data:www-data /var/www
-    chmod -R 755 /var/www
+    chown -R www-data:www-data /var/www >> "$LOG_FILE" 2>&1
+    chmod -R 755 /var/www >> "$LOG_FILE" 2>&1
     
-    log_success "R-Panel directory structure created"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "R-Panel directory structure created"
+    fi
 }
 
 # Create basic Nginx configuration for R-Panel
 create_nginx_config() {
-    log_info "Creating Nginx configuration for R-Panel..."
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Creating Nginx configuration..."
+    fi
     
-    cat > /etc/nginx/sites-available/r-panel.conf <<'EOF'
+    # Create a basic default configuration for user websites
+    cat > /etc/nginx/sites-available/default <<'EOF'
 server {
-    listen 80;
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    
+    root /var/www/html;
+    index index.html index.htm index.php;
+    
     server_name _;
     
-    root /var/www/r-panel/public;
-    index index.php index.html index.htm;
-    
-    access_log /opt/r-panel/logs/access.log;
-    error_log /opt/r-panel/logs/error.log;
-    
-    client_max_body_size 100M;
-    
     location / {
-        try_files $uri $uri/ /index.php?$query_string;
+        try_files $uri $uri/ =404;
     }
     
     location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
         fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
-        fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        include fastcgi_params;
     }
     
     location ~ /\.ht {
@@ -374,58 +511,276 @@ server {
 }
 EOF
 
-    # Enable the site
-    ln -sf /etc/nginx/sites-available/r-panel.conf /etc/nginx/sites-enabled/
-    rm -f /etc/nginx/sites-enabled/default
+    # Enable the default site
+    ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default >> "$LOG_FILE" 2>&1
     
     # Test and reload Nginx
-    nginx -t && systemctl reload nginx
+    nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx >> "$LOG_FILE" 2>&1
     
-    log_success "Nginx configuration created"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Nginx configuration created"
+    fi
 }
 
 # Optimize PHP-FPM configuration
 optimize_php_fpm() {
-    log_info "Optimizing PHP-FPM configuration..."
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Optimizing PHP-FPM configuration..."
+    fi
     
     PHP_VERSION="8.2"
     PHP_FPM_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
     
     # Backup original config
-    cp $PHP_FPM_CONF ${PHP_FPM_CONF}.backup
+    cp $PHP_FPM_CONF ${PHP_FPM_CONF}.backup >> "$LOG_FILE" 2>&1
     
     # Update PHP-FPM pool settings
-    sed -i 's/pm = dynamic/pm = ondemand/' $PHP_FPM_CONF
-    sed -i 's/pm.max_children = .*/pm.max_children = 50/' $PHP_FPM_CONF
-    sed -i 's/pm.start_servers = .*/pm.start_servers = 5/' $PHP_FPM_CONF
-    sed -i 's/pm.min_spare_servers = .*/pm.min_spare_servers = 5/' $PHP_FPM_CONF
-    sed -i 's/pm.max_spare_servers = .*/pm.max_spare_servers = 10/' $PHP_FPM_CONF
+    sed -i 's/pm = dynamic/pm = ondemand/' $PHP_FPM_CONF 2>> "$LOG_FILE"
+    sed -i 's/pm.max_children = .*/pm.max_children = 50/' $PHP_FPM_CONF 2>> "$LOG_FILE"
+    sed -i 's/pm.start_servers = .*/pm.start_servers = 5/' $PHP_FPM_CONF 2>> "$LOG_FILE"
+    sed -i 's/pm.min_spare_servers = .*/pm.min_spare_servers = 5/' $PHP_FPM_CONF 2>> "$LOG_FILE"
+    sed -i 's/pm.max_spare_servers = .*/pm.max_spare_servers = 10/' $PHP_FPM_CONF 2>> "$LOG_FILE"
     
     # Restart PHP-FPM
-    systemctl restart php${PHP_VERSION}-fpm
+    systemctl restart php${PHP_VERSION}-fpm >> "$LOG_FILE" 2>&1
     
-    log_success "PHP-FPM optimized"
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "PHP-FPM optimized"
+    fi
 }
 
 # Create swap if not exists (to prevent memory issues)
 create_swap() {
-    log_info "Checking swap memory..."
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Checking swap memory..."
+    fi
     
     if [ "$(swapon --show | wc -l)" -eq 0 ]; then
-        log_warning "No swap detected. Creating 2GB swap file..."
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_warning "No swap detected. Creating 2GB swap file..."
+        fi
         
-        fallocate -l 2G /swapfile
-        chmod 600 /swapfile
-        mkswap /swapfile
-        swapon /swapfile
+        fallocate -l 2G /swapfile >> "$LOG_FILE" 2>&1
+        chmod 600 /swapfile >> "$LOG_FILE" 2>&1
+        mkswap /swapfile >> "$LOG_FILE" 2>&1
+        swapon /swapfile >> "$LOG_FILE" 2>&1
         
         # Make it permanent
-        echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+        echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab >> "$LOG_FILE" 2>&1
         
-        log_success "Swap file created successfully"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "Swap file created successfully"
+        fi
     else
-        log_info "Swap already exists"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Swap already exists"
+        fi
     fi
+}
+
+# Detect R-Panel source code location
+detect_rpanel_source() {
+    local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    
+    # Check if we're inside r-panel repository (Go project)
+    if [ -f "$SCRIPT_DIR/go.mod" ] || [ -f "$SCRIPT_DIR/main.go" ] || [ -d "$SCRIPT_DIR/.git" ]; then
+        echo "$SCRIPT_DIR"
+        return 0
+    fi
+    
+    # Check parent directory (in case script is in subdirectory)
+    local PARENT_DIR="$(dirname "$SCRIPT_DIR")"
+    if [ -f "$PARENT_DIR/go.mod" ] || [ -f "$PARENT_DIR/main.go" ]; then
+        echo "$PARENT_DIR"
+        return 0
+    fi
+    
+    # No source found
+    echo ""
+    return 1
+}
+
+# Compile and install R-Panel (Go application)
+compile_and_install_rpanel() {
+    local SOURCE_DIR=$(detect_rpanel_source)
+    
+    if [ -z "$SOURCE_DIR" ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_warning "R-Panel source code not found in current directory"
+            log_info "Skipping R-Panel compilation"
+            log_info "To install R-Panel later:"
+            log_info "  1. Clone: git clone https://github.com/mrizkir/r-panel"
+            log_info "  2. Run: cd r-panel && ./install.sh"
+        fi
+        return 0
+    fi
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "R-Panel source found at: $SOURCE_DIR"
+        log_info "Compiling R-Panel..."
+    fi
+    
+    cd "$SOURCE_DIR"
+    
+    # Set Go environment
+    export PATH=$PATH:/usr/local/go/bin
+    export GOPATH=$HOME/go
+    
+    # Build frontend assets if package.json exists
+    if [ -f "package.json" ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Installing frontend dependencies..."
+        fi
+        npm install >> "$LOG_FILE" 2>&1
+        
+        # Check if build script exists
+        if grep -q '"build"' package.json; then
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Building frontend assets..."
+            fi
+            npm run build >> "$LOG_FILE" 2>&1
+        fi
+    fi
+    
+    # Build Go application
+    if [ -f "main.go" ] || [ -f "cmd/main.go" ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Building Go application..."
+        fi
+        
+        # Determine main file location
+        if [ -f "cmd/main.go" ]; then
+            MAIN_PATH="./cmd"
+        else
+            MAIN_PATH="."
+        fi
+        
+        # Build with optimizations
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags="-s -w" \
+            -o r-panel \
+            $MAIN_PATH >> "$LOG_FILE" 2>&1
+        
+        if [ ! -f "r-panel" ]; then
+            log_error "Go build failed. Check logs: $LOG_FILE"
+            cd - >> "$LOG_FILE" 2>&1
+            return 1
+        fi
+        
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "Go application compiled successfully"
+        fi
+    else
+        log_error "No main.go file found"
+        cd - >> "$LOG_FILE" 2>&1
+        return 1
+    fi
+    
+    # Create installation directory
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Installing R-Panel to /usr/local/r-panel..."
+    fi
+    
+    mkdir -p /usr/local/r-panel >> "$LOG_FILE" 2>&1
+    
+    # Copy compiled binary and required files
+    cp r-panel /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+    
+    # Copy static files, templates, config, etc.
+    for dir in static templates public assets config web; do
+        if [ -d "$dir" ]; then
+            cp -r "$dir" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+        fi
+    done
+    
+    # Copy config files if exist
+    for file in config.yaml config.yml .env.example config.toml; do
+        if [ -f "$file" ]; then
+            cp "$file" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+        fi
+    done
+    
+    # Create config from example if needed
+    if [ -f /usr/local/r-panel/.env.example ] && [ ! -f /usr/local/r-panel/.env ]; then
+        cp /usr/local/r-panel/.env.example /usr/local/r-panel/.env >> "$LOG_FILE" 2>&1
+    fi
+    
+    if [ -f /usr/local/r-panel/config.yaml.example ] && [ ! -f /usr/local/r-panel/config.yaml ]; then
+        cp /usr/local/r-panel/config.yaml.example /usr/local/r-panel/config.yaml >> "$LOG_FILE" 2>&1
+    fi
+    
+    # Set proper permissions
+    chown -R www-data:www-data /usr/local/r-panel >> "$LOG_FILE" 2>&1
+    chmod -R 755 /usr/local/r-panel >> "$LOG_FILE" 2>&1
+    chmod +x /usr/local/r-panel/r-panel >> "$LOG_FILE" 2>&1
+    
+    # Create data directories if needed
+    mkdir -p /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1
+    chown -R www-data:www-data /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1
+    chmod -R 775 /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1
+    
+    # Create symbolic link for easy access
+    ln -sf /usr/local/r-panel/r-panel /usr/local/bin/r-panel >> "$LOG_FILE" 2>&1
+    
+    # Create systemd service for R-Panel
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Creating R-Panel systemd service..."
+    fi
+    
+    cat > /etc/systemd/system/r-panel.service <<EOF
+[Unit]
+Description=R-Panel Hosting Control Panel (Go)
+After=network.target mysql.service redis.service
+Requires=mysql.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/usr/local/r-panel
+Environment="PORT=8080"
+Environment="GIN_MODE=release"
+ExecStart=/usr/local/r-panel/r-panel
+Restart=always
+RestartSec=3
+StandardOutput=append:/opt/r-panel/logs/r-panel.log
+StandardError=append:/opt/r-panel/logs/r-panel-error.log
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/usr/local/r-panel/data /usr/local/r-panel/logs /usr/local/r-panel/uploads /opt/r-panel/logs /var/www/vhosts
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Reload systemd
+    systemctl daemon-reload >> "$LOG_FILE" 2>&1
+    
+    # Enable and start R-Panel service
+    systemctl enable r-panel >> "$LOG_FILE" 2>&1
+    systemctl start r-panel >> "$LOG_FILE" 2>&1
+    
+    # Wait a moment for service to start
+    sleep 3
+    
+    # Check if R-Panel service is running
+    if systemctl is-active --quiet r-panel; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "R-Panel service started successfully on port 8080"
+        fi
+    else
+        log_warning "R-Panel service failed to start. Check logs: journalctl -u r-panel"
+    fi
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "R-Panel compiled and installed successfully"
+    fi
+    
+    cd - >> "$LOG_FILE" 2>&1
 }
 
 # Display system information
@@ -441,23 +796,95 @@ display_info() {
     echo "  ✓ MariaDB: $(mysql --version | cut -d' ' -f6 | cut -d'-' -f1)"
     echo "  ✓ Redis: $(redis-server --version | cut -d'=' -f2 | cut -d' ' -f1)"
     echo "  ✓ Node.js: $(node -v)"
-    echo "  ✓ Composer: $(composer --version | cut -d' ' -f3)"
+    echo "  ✓ Go: $(/usr/local/go/bin/go version 2>/dev/null | cut -d' ' -f3 | sed 's/go//')"
+    echo "  ✓ Composer: $(COMPOSER_ALLOW_SUPERUSER=1 composer --version 2>/dev/null | cut -d' ' -f3)"
+    
+    # Check if R-Panel was installed
+    if [ -d /usr/local/r-panel ]; then
+        echo "  ✓ R-Panel: Installed at /usr/local/r-panel"
+        
+        # Check if service is running
+        if systemctl is-active --quiet r-panel 2>/dev/null; then
+            echo "    └─ Service: Running on port 8080"
+        else
+            echo "    └─ Service: Stopped (check logs)"
+        fi
+    fi
+    
     echo ""
     echo "Directories Created:"
     echo "  • /opt/r-panel (panel files)"
     echo "  • /var/www/r-panel (web files)"
     echo "  • /var/www/vhosts (user websites)"
+    
+    if [ -d /usr/local/r-panel ]; then
+        echo "  • /usr/local/r-panel (R-Panel application)"
+    fi
+    
     echo ""
+    
+    # Get server IP
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+    
+    if [ -d /usr/local/r-panel ]; then
+        echo "Access R-Panel:"
+        echo "  • Direct Access: http://$SERVER_IP:8080"
+        echo "  • With Domain: http://your-domain.com:8080"
+        echo "  • With SSL: https://your-domain.com:8080"
+        echo ""
+        echo "NOTE: Clients will access R-Panel on their own domains:"
+        echo "      https://client1.com:8080"
+        echo "      https://client2.org:8080"
+        echo ""
+    fi
+    
     echo "Next Steps:"
-    echo "  1. Run: mysql_secure_installation"
-    echo "  2. Upload R-Panel source code to /var/www/r-panel"
-    echo "  3. Configure database in /opt/r-panel/config"
-    echo "  4. Set up SSL certificate with certbot"
+    
+    if [ -d /usr/local/r-panel ]; then
+        echo "  1. Configure R-Panel:"
+        echo "     - Edit: nano /usr/local/r-panel/config.yaml"
+        echo "     - Or: nano /usr/local/r-panel/.env"
+        echo "  2. Run: mysql_secure_installation"
+        echo "  3. Create database for R-Panel:"
+        echo "     mysql -e \"CREATE DATABASE rpanel;\""
+        echo "     mysql -e \"CREATE USER 'rpanel'@'localhost' IDENTIFIED BY 'your_password';\""
+        echo "     mysql -e \"GRANT ALL ON rpanel.* TO 'rpanel'@'localhost';\""
+        echo "  4. Update database config in R-Panel configuration file"
+        echo "  5. Restart R-Panel: systemctl restart r-panel"
+        echo "  6. Set up SSL certificate for port 8080 (optional):"
+        echo "     - Configure SSL directly in R-Panel settings"
+        echo "     - Or use a reverse proxy (nginx/apache) for SSL termination"
+    else
+        echo "  1. Run: mysql_secure_installation"
+        echo "  2. Clone R-Panel: git clone https://github.com/mrizkir/r-panel"
+        echo "  3. Install R-Panel: cd r-panel && ./install.sh"
+    fi
+    
     echo ""
     echo "Useful Commands:"
     echo "  • Check services: systemctl status nginx php8.2-fpm mariadb"
+    
+    if [ -d /usr/local/r-panel ]; then
+        echo "  • R-Panel status: systemctl status r-panel"
+        echo "  • R-Panel logs: journalctl -u r-panel -f"
+        echo "  • Application logs: tail -f /opt/r-panel/logs/*.log"
+        echo "  • Restart R-Panel: systemctl restart r-panel"
+    fi
+    
     echo "  • View logs: tail -f /opt/r-panel/logs/*.log"
     echo "  • Nginx test: nginx -t"
+    
+    if [ -d /usr/local/r-panel ]; then
+        echo "  • R-Panel CLI: r-panel --help"
+    fi
+    
+    echo ""
+    echo "Firewall Ports:"
+    echo "  • 22   - SSH"
+    echo "  • 80   - HTTP (User Websites)"
+    echo "  • 443  - HTTPS (User Websites)"
+    echo "  • 8080 - R-Panel Control Panel"
+    echo "  • 3306 - MySQL (optional, for remote access)"
     echo ""
     echo "=============================================="
     echo ""
@@ -466,11 +893,26 @@ display_info() {
 # Main installation flow
 main() {
     clear
-    echo "=============================================="
-    echo "  R-Panel Installation Script"
-    echo "  Installing all required components..."
-    echo "=============================================="
-    echo ""
+    
+    if [ "$VERBOSE_MODE" = false ]; then
+        echo "=============================================="
+        echo "  R-Panel Installation Script"
+        echo "  Installing all required components..."
+        echo "=============================================="
+        echo ""
+        echo "Mode: Quiet (Progress Bar)"
+        echo "Log file: $LOG_FILE"
+        echo ""
+    else
+        echo "=============================================="
+        echo "  R-Panel Installation Script"
+        echo "  Installing all required components..."
+        echo "=============================================="
+        echo ""
+        echo "Mode: Verbose (Detailed Output)"
+        echo "Log file: $LOG_FILE"
+        echo ""
+    fi
     
     check_root
     detect_os
@@ -484,6 +926,7 @@ main() {
     install_mariadb
     install_redis
     install_nodejs
+    install_go
     install_composer
     
     # Configuration steps
@@ -494,10 +937,20 @@ main() {
     optimize_php_fpm
     create_swap
     
+    # Compile and install R-Panel if source exists
+    compile_and_install_rpanel
+    
+    # Clear progress bar line if in quiet mode
+    if [ "$VERBOSE_MODE" = false ]; then
+        echo ""
+    fi
+    
     # Display summary
     display_info
     
     log_success "Installation completed successfully!"
+    echo ""
+    log_info "Full installation log saved to: $LOG_FILE"
     echo ""
     log_warning "IMPORTANT: Reboot the server to ensure all configurations are active"
     echo ""
