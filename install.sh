@@ -113,6 +113,12 @@ execute() {
     local description="$1"
     shift
     
+    # Check if command involves apt-get or add-apt-repository and wait for locks
+    local cmd_str="$*"
+    if [[ "$cmd_str" == *"apt-get"* ]] || [[ "$cmd_str" == *"add-apt-repository"* ]] || [[ "$cmd_str" == *"apt"* ]]; then
+        wait_for_apt_lock
+    fi
+    
     if [ "$VERBOSE_MODE" = true ]; then
         log_info "execute() called with: $description"
         log_info "Current step before increment: $CURRENT_STEP"
@@ -206,6 +212,59 @@ check_root() {
         log_error "This script must be run as root"
         exit 1
     fi
+}
+
+# Wait for apt/dpkg lock to be released
+wait_for_apt_lock() {
+    local max_wait=300  # Maximum wait time in seconds (5 minutes)
+    local wait_time=0
+    local check_interval=2  # Check every 2 seconds
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Checking for apt/dpkg locks..."
+    fi
+    
+    while [ $wait_time -lt $max_wait ]; do
+        # Check if lock files exist and if processes are running
+        if lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+           lsof /var/lib/dpkg/lock >/dev/null 2>&1 || \
+           lsof /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+           lsof /var/cache/apt/archives/lock >/dev/null 2>&1; then
+            
+            # Get the process holding the lock
+            local lock_process=$(lsof /var/lib/dpkg/lock-frontend 2>/dev/null | tail -n +2 | awk '{print $2}' | head -1)
+            
+            if [ -n "$lock_process" ]; then
+                local process_name=$(ps -p "$lock_process" -o comm= 2>/dev/null || echo "unknown")
+                if [ "$VERBOSE_MODE" = true ]; then
+                    log_warning "apt/dpkg lock is held by process $lock_process ($process_name). Waiting..."
+                fi
+            else
+                if [ "$VERBOSE_MODE" = true ]; then
+                    log_warning "apt/dpkg lock detected. Waiting..."
+                fi
+            fi
+            
+            sleep $check_interval
+            wait_time=$((wait_time + check_interval))
+        else
+            # No locks found, we can proceed
+            if [ $wait_time -gt 0 ]; then
+                if [ "$VERBOSE_MODE" = true ]; then
+                    log_success "apt/dpkg locks released after ${wait_time} seconds"
+                fi
+            fi
+            return 0
+        fi
+    done
+    
+    # If we get here, we've waited too long
+    log_error "Timeout waiting for apt/dpkg locks to be released (waited ${max_wait} seconds)"
+    log_error "Another package management process may be running."
+    log_error "Please check for running apt/apt-get/dpkg processes:"
+    log_error "  ps aux | grep -E 'apt|dpkg'"
+    log_error "Or wait for the process to complete and try again."
+    return 1
 }
 
 # Prompt for server name
@@ -601,6 +660,9 @@ update_system() {
         log_info "Entering update_system() function"
     fi
     
+    # Wait for apt locks before updating
+    wait_for_apt_lock
+    
     # Configure apt to not ask questions
     if command -v debconf-set-selections &> /dev/null; then
         set +e  # Temporarily disable exit on error
@@ -627,6 +689,9 @@ update_system() {
 
 # Install basic utilities
 install_utilities() {
+    # Wait for apt locks before installing
+    wait_for_apt_lock
+    
     execute "Installing basic utilities" apt-get install -y \
         debconf-utils \
         apt-transport-https \
@@ -680,6 +745,7 @@ install_certbot() {
         log_info "Installing Certbot for SSL certificates..."
     fi
     
+    wait_for_apt_lock
     execute "Installing Certbot" apt-get install -y certbot python3-certbot-nginx
     
     # Enable certbot auto-renewal timer
@@ -696,12 +762,17 @@ install_php() {
     # PHP version to install
     PHP_VERSION="8.2"
     
+    # Wait for apt locks before installing PHP
+    wait_for_apt_lock
+    
     # Add PHP repository based on OS
     if [ "$OS" = "ubuntu" ]; then
         if [ "$VERBOSE_MODE" = true ]; then
             log_info "Adding Ondrej PHP repository for Ubuntu..."
         fi
+        wait_for_apt_lock
         add-apt-repository -y ppa:ondrej/php >> "$LOG_FILE" 2>&1
+        wait_for_apt_lock
         apt-get update -y >> "$LOG_FILE" 2>&1
     elif [ "$OS" = "debian" ]; then
         if [ "$VERBOSE_MODE" = true ]; then
@@ -714,6 +785,7 @@ install_php() {
         # Add repository
         echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php.list
         
+        wait_for_apt_lock
         apt-get update -y >> "$LOG_FILE" 2>&1
     fi
     
@@ -747,6 +819,7 @@ install_php() {
 
 # Install MariaDB
 install_mariadb() {
+    wait_for_apt_lock
     execute "Installing MariaDB" apt-get install -y mariadb-server mariadb-client
     
     # Enable and start MariaDB
@@ -761,6 +834,7 @@ install_mariadb() {
 
 # Install Redis (optional but recommended for caching)
 install_redis() {
+    wait_for_apt_lock
     execute "Installing Redis" apt-get install -y redis-server
     
     # Enable and start Redis
@@ -778,8 +852,10 @@ install_nodejs() {
     if [ "$VERBOSE_MODE" = true ]; then
         log_info "Adding NodeSource repository..."
     fi
+    wait_for_apt_lock
     curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - >> "$LOG_FILE" 2>&1
     
+    wait_for_apt_lock
     execute "Installing Node.js and npm" apt-get install -y nodejs
     
     # Install Yarn
@@ -2305,6 +2381,13 @@ main() {
     fi
     
     check_root
+    
+    # Wait for apt locks before starting installation
+    if ! wait_for_apt_lock; then
+        log_error "Cannot proceed with installation. Please resolve apt lock issues and try again."
+        exit 1
+    fi
+    
     detect_os
     
     # Prompt for server name
@@ -2333,7 +2416,10 @@ main() {
         if [ "$VERBOSE_MODE" = true ]; then
             log_info "Installing debconf-utils (required for non-interactive mode)..."
         fi
+        # Wait for apt locks before installing debconf-utils
+        wait_for_apt_lock
         apt-get update -qq >> "$LOG_FILE" 2>&1
+        wait_for_apt_lock
         apt-get install -y -qq debconf-utils >> "$LOG_FILE" 2>&1
     fi
     
