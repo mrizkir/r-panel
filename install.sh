@@ -1202,19 +1202,43 @@ compile_and_install_rpanel() {
     export PATH=$PATH:/usr/local/go/bin
     export GOPATH=$HOME/go
     
-    # Build frontend assets if package.json exists
-    if [ -f "package.json" ]; then
+    # Build frontend assets if frontend directory exists
+    if [ -d "frontend" ] && [ -f "frontend/package.json" ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Building frontend assets from frontend/ directory..."
+        fi
+        
+        cd frontend
+        
+        # Install frontend dependencies
         if [ "$VERBOSE_MODE" = true ]; then
             log_info "Installing frontend dependencies..."
         fi
         npm install >> "$LOG_FILE" 2>&1
         
-        # Check if build script exists
+        # Check if build script exists and build
         if grep -q '"build"' package.json; then
             if [ "$VERBOSE_MODE" = true ]; then
-                log_info "Building frontend assets..."
+                log_info "Building frontend assets (output to backend/web/dist)..."
             fi
             npm run build >> "$LOG_FILE" 2>&1
+            
+            if [ "$VERBOSE_MODE" = true ]; then
+                if [ -d "../backend/web/dist" ]; then
+                    log_success "Frontend built successfully to backend/web/dist"
+                else
+                    log_warning "Frontend build completed but backend/web/dist not found"
+                fi
+            fi
+        else
+            log_warning "No build script found in frontend/package.json"
+        fi
+        
+        # Return to source directory
+        cd "$SOURCE_DIR"
+    else
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_warning "Frontend directory or package.json not found, skipping frontend build"
         fi
     fi
     
