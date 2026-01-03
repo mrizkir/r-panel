@@ -439,14 +439,28 @@ configure_hostname() {
         log_info "Configuring hostname and /etc/hosts..."
     fi
     
-    # Get current hostname
-    local CURRENT_HOSTNAME=$(hostname)
-    local CURRENT_FQDN=$(hostname -f 2>/dev/null || hostname)
+    # Backup /etc/hosts before making any changes
+    if [ -f /etc/hosts ]; then
+        if [ ! -f /etc/hosts.bak ]; then
+            cp /etc/hosts /etc/hosts.bak >> "$LOG_FILE" 2>&1 || true
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Backed up /etc/hosts to /etc/hosts.bak"
+            fi
+        else
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "/etc/hosts.bak already exists, skipping backup"
+            fi
+        fi
+    fi
     
-    # Only configure if server name is different from current hostname
-    if [ "$SERVER_NAME" != "$CURRENT_HOSTNAME" ] && [ "$SERVER_NAME" != "$CURRENT_FQDN" ]; then
+    # Get current hostname
+    local CURRENT_HOSTNAME=$(hostname 2>/dev/null || echo "")
+    local CURRENT_FQDN=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "")
+    
+    # Always set hostname if SERVER_NAME is provided and different
+    if [ -n "$SERVER_NAME" ] && [ "$SERVER_NAME" != "$CURRENT_HOSTNAME" ] && [ "$SERVER_NAME" != "$CURRENT_FQDN" ]; then
         if [ "$VERBOSE_MODE" = true ]; then
-            log_info "Setting hostname to: $SERVER_NAME"
+            log_info "Setting hostname from '$CURRENT_HOSTNAME' to '$SERVER_NAME'"
         fi
         
         # Set hostname using hostnamectl
@@ -460,57 +474,63 @@ configure_hostname() {
                 log_success "Hostname set to: $SERVER_NAME"
             fi
         else
-            log_warning "Failed to set hostname using hostnamectl. Continuing..."
+            log_warning "Failed to set hostname using hostnamectl. Trying alternative method..."
+            # Try alternative method
+            set +e
+            echo "$SERVER_NAME" > /etc/hostname 2>> "$LOG_FILE" || true
+            set -e
         fi
     else
         if [ "$VERBOSE_MODE" = true ]; then
-            log_info "Hostname already set to: $SERVER_NAME"
+            log_info "Hostname already set to: $SERVER_NAME (no change needed)"
         fi
     fi
     
     # Update /etc/hosts if IP and server name are provided
     if [ -n "$SERVER_IP" ] && [ -n "$SERVER_NAME" ] && [ "$SERVER_IP" != "127.0.0.1" ] && [ "$SERVER_NAME" != "default" ]; then
-        # Check if entry already exists in /etc/hosts
-        if ! grep -qE "^[[:space:]]*${SERVER_IP}[[:space:]]+.*${SERVER_NAME}" /etc/hosts 2>/dev/null; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Updating /etc/hosts with $SERVER_IP -> $SERVER_NAME"
+        fi
+        
+        # Remove old entries that contain the IP or server name (to avoid duplicates and malformed entries)
+        set +e
+        # Remove lines containing the IP address (but keep localhost entries)
+        sed -i "/^[[:space:]]*${SERVER_IP}[[:space:]]/d" /etc/hosts 2>> "$LOG_FILE" || true
+        # Remove lines ending with the server name (but be careful with localhost)
+        sed -i "/[[:space:]]${SERVER_NAME}[[:space:]]*$/d" /etc/hosts 2>> "$LOG_FILE" || true
+        # Remove lines that have server name in the middle
+        sed -i "/[[:space:]]${SERVER_NAME}[[:space:]]/d" /etc/hosts 2>> "$LOG_FILE" || true
+        set -e
+        
+        # Add new entry with proper formatting
+        set +e
+        printf "%s\t%s\n" "$SERVER_IP" "$SERVER_NAME" >> /etc/hosts 2>> "$LOG_FILE"
+        local hosts_result=$?
+        set -e
+        
+        if [ $hosts_result -eq 0 ]; then
             if [ "$VERBOSE_MODE" = true ]; then
-                log_info "Adding $SERVER_IP $SERVER_NAME to /etc/hosts"
-            fi
-            
-            # Backup /etc/hosts
-            cp /etc/hosts /etc/hosts.backup.$(date +%Y%m%d_%H%M%S) >> "$LOG_FILE" 2>&1 || true
-            
-            # Remove old entry if exists (to avoid duplicates)
-            sed -i "/[[:space:]]*${SERVER_NAME}[[:space:]]*$/d" /etc/hosts 2>> "$LOG_FILE" || true
-            
-            # Add new entry
-            set +e
-            echo "$SERVER_IP    $SERVER_NAME" >> /etc/hosts 2>> "$LOG_FILE"
-            local hosts_result=$?
-            set -e
-            
-            if [ $hosts_result -eq 0 ]; then
-                if [ "$VERBOSE_MODE" = true ]; then
-                    log_success "Updated /etc/hosts with $SERVER_IP -> $SERVER_NAME"
-                fi
-            else
-                log_warning "Failed to update /etc/hosts. You may need to add it manually."
+                log_success "Updated /etc/hosts with $SERVER_IP -> $SERVER_NAME"
             fi
         else
-            if [ "$VERBOSE_MODE" = true ]; then
-                log_info "Entry for $SERVER_IP -> $SERVER_NAME already exists in /etc/hosts"
-            fi
+            log_warning "Failed to update /etc/hosts. You may need to add it manually."
         fi
     fi
     
-    # Also ensure localhost entry exists
+    # Also ensure localhost entry exists and is correct
+    set +e
     if ! grep -qE "^[[:space:]]*127\.0\.0\.1[[:space:]]+.*localhost" /etc/hosts 2>/dev/null; then
         if [ "$VERBOSE_MODE" = true ]; then
             log_info "Ensuring localhost entry exists in /etc/hosts"
         fi
-        set +e
-        echo "127.0.0.1    localhost" >> /etc/hosts 2>> "$LOG_FILE" || true
-        set -e
+        printf "127.0.0.1\tlocalhost\n" >> /etc/hosts 2>> "$LOG_FILE" || true
     fi
+    
+    # Ensure IPv6 localhost entry exists
+    if ! grep -qE "^[[:space:]]*::1[[:space:]]+.*localhost" /etc/hosts 2>/dev/null; then
+        printf "::1\t\tlocalhost\n" >> /etc/hosts 2>> "$LOG_FILE" || true
+    fi
+    set -e
 }
 
 # Detect OS
@@ -1172,56 +1192,82 @@ compile_and_install_rpanel() {
     
     mkdir -p /usr/local/r-panel >> "$LOG_FILE" 2>&1
     
-    # Copy compiled binary and required files
-    cp r-panel /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+    # Copy compiled binary and required files (with error handling)
+    set +e
+    if [ -f "r-panel" ]; then
+        cp -f r-panel /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+        local cp_result=$?
+        if [ $cp_result -ne 0 ]; then
+            log_warning "Failed to copy r-panel binary. Continuing..."
+        fi
+    else
+        log_error "r-panel binary not found in current directory"
+        cd "$SOURCE_DIR" >> "$LOG_FILE" 2>&1
+        return 1
+    fi
+    set -e
     
     # Copy static files, templates, config, etc. (check both root and backend)
     for dir in static templates public assets config web; do
+        set +e
         if [ -d "$dir" ]; then
-            cp -r "$dir" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+            cp -r "$dir" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1 || true
         elif [ -d "backend/$dir" ]; then
-            cp -r "backend/$dir" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+            cp -r "backend/$dir" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1 || true
         fi
+        set -e
     done
     
     # Copy backend-specific directories
+    set +e
     if [ -d "backend/templates" ]; then
-        cp -r backend/templates /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+        cp -r backend/templates /usr/local/r-panel/ >> "$LOG_FILE" 2>&1 || true
     fi
     if [ -d "backend/configs" ]; then
-        cp -r backend/configs /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+        cp -r backend/configs /usr/local/r-panel/ >> "$LOG_FILE" 2>&1 || true
     fi
+    set -e
     
     # Copy config files if exist (check both root and backend)
     for file in config.yaml config.yml .env.example config.toml; do
+        set +e
         if [ -f "$file" ]; then
-            cp "$file" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+            cp "$file" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1 || true
         elif [ -f "backend/$file" ]; then
-            cp "backend/$file" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+            cp "backend/$file" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1 || true
         fi
+        set -e
     done
     
     # Create config from example if needed
+    set +e
     if [ -f /usr/local/r-panel/.env.example ] && [ ! -f /usr/local/r-panel/.env ]; then
-        cp /usr/local/r-panel/.env.example /usr/local/r-panel/.env >> "$LOG_FILE" 2>&1
+        cp /usr/local/r-panel/.env.example /usr/local/r-panel/.env >> "$LOG_FILE" 2>&1 || true
     fi
     
     if [ -f /usr/local/r-panel/config.yaml.example ] && [ ! -f /usr/local/r-panel/config.yaml ]; then
-        cp /usr/local/r-panel/config.yaml.example /usr/local/r-panel/config.yaml >> "$LOG_FILE" 2>&1
+        cp /usr/local/r-panel/config.yaml.example /usr/local/r-panel/config.yaml >> "$LOG_FILE" 2>&1 || true
     fi
+    set -e
     
     # Set proper permissions
-    chown -R www-data:www-data /usr/local/r-panel >> "$LOG_FILE" 2>&1
-    chmod -R 755 /usr/local/r-panel >> "$LOG_FILE" 2>&1
-    chmod +x /usr/local/r-panel/r-panel >> "$LOG_FILE" 2>&1
+    set +e
+    chown -R www-data:www-data /usr/local/r-panel >> "$LOG_FILE" 2>&1 || true
+    chmod -R 755 /usr/local/r-panel >> "$LOG_FILE" 2>&1 || true
+    chmod +x /usr/local/r-panel/r-panel >> "$LOG_FILE" 2>&1 || true
+    set -e
     
     # Create data directories if needed
-    mkdir -p /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1
-    chown -R www-data:www-data /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1
-    chmod -R 775 /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1
+    set +e
+    mkdir -p /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1 || true
+    chown -R www-data:www-data /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1 || true
+    chmod -R 775 /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1 || true
+    set -e
     
     # Create symbolic link for easy access
-    ln -sf /usr/local/r-panel/r-panel /usr/local/bin/r-panel >> "$LOG_FILE" 2>&1
+    set +e
+    ln -sf /usr/local/r-panel/r-panel /usr/local/bin/r-panel >> "$LOG_FILE" 2>&1 || true
+    set -e
     
     # Create systemd service for R-Panel
     if [ "$VERBOSE_MODE" = true ]; then
@@ -1259,11 +1305,15 @@ WantedBy=multi-user.target
 EOF
 
     # Reload systemd
-    systemctl daemon-reload >> "$LOG_FILE" 2>&1
+    set +e
+    systemctl daemon-reload >> "$LOG_FILE" 2>&1 || true
+    set -e
     
     # Enable and start R-Panel service
-    systemctl enable r-panel >> "$LOG_FILE" 2>&1
-    systemctl start r-panel >> "$LOG_FILE" 2>&1
+    set +e
+    systemctl enable r-panel >> "$LOG_FILE" 2>&1 || log_warning "Failed to enable r-panel service"
+    systemctl start r-panel >> "$LOG_FILE" 2>&1 || log_warning "Failed to start r-panel service"
+    set -e
     
     # Wait a moment for service to start
     sleep 3
