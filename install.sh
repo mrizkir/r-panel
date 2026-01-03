@@ -1433,30 +1433,41 @@ compile_and_install_rpanel() {
     if [ -d "backend/templates" ]; then
         cp -r backend/templates /usr/local/r-panel/ >> "$LOG_FILE" 2>&1 || true
     fi
+    
+    # Ensure configs directory exists
+    mkdir -p /usr/local/r-panel/configs >> "$LOG_FILE" 2>&1
+    
+    # Copy configs directory if exists
     if [ -d "backend/configs" ]; then
-        cp -r backend/configs /usr/local/r-panel/ >> "$LOG_FILE" 2>&1 || true
+        cp -r backend/configs/* /usr/local/r-panel/configs/ >> "$LOG_FILE" 2>&1 || true
     fi
     set -e
     
-    # Copy config files if exist (check both root and backend)
-    for file in config.yaml config.yml .env.example config.toml; do
-        set +e
-        if [ -f "$file" ]; then
-            cp "$file" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1 || true
-        elif [ -f "backend/$file" ]; then
-            cp "backend/$file" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1 || true
-        fi
-        set -e
-    done
-    
-    # Create config from example if needed
+    # Create config.yaml from example if needed (in configs/ directory)
     set +e
-    if [ -f /usr/local/r-panel/.env.example ] && [ ! -f /usr/local/r-panel/.env ]; then
-        cp /usr/local/r-panel/.env.example /usr/local/r-panel/.env >> "$LOG_FILE" 2>&1 || true
+    if [ -f /usr/local/r-panel/configs/config.example.yaml ] && [ ! -f /usr/local/r-panel/configs/config.yaml ]; then
+        cp /usr/local/r-panel/configs/config.example.yaml /usr/local/r-panel/configs/config.yaml >> "$LOG_FILE" 2>&1
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Created config.yaml from config.example.yaml"
+        fi
     fi
     
-    if [ -f /usr/local/r-panel/config.yaml.example ] && [ ! -f /usr/local/r-panel/config.yaml ]; then
-        cp /usr/local/r-panel/config.yaml.example /usr/local/r-panel/config.yaml >> "$LOG_FILE" 2>&1 || true
+    # Also check if config.yaml exists in root and copy to configs/ if needed
+    if [ -f /usr/local/r-panel/config.yaml ] && [ ! -f /usr/local/r-panel/configs/config.yaml ]; then
+        cp /usr/local/r-panel/config.yaml /usr/local/r-panel/configs/config.yaml >> "$LOG_FILE" 2>&1
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Copied config.yaml from root to configs/"
+        fi
+    fi
+    
+    # Verify config.yaml exists in configs/ directory
+    if [ ! -f /usr/local/r-panel/configs/config.yaml ]; then
+        log_error "config.yaml not found in /usr/local/r-panel/configs/"
+        log_error "Please create it manually or ensure config.example.yaml exists"
+    else
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "Config file verified at /usr/local/r-panel/configs/config.yaml"
+        fi
     fi
     set -e
     
@@ -1619,8 +1630,9 @@ display_info() {
     
     if [ -d /usr/local/r-panel ]; then
         echo "  1. Configure R-Panel:"
-        echo "     - Edit: nano /usr/local/r-panel/config.yaml"
-        echo "     - Or: nano /usr/local/r-panel/.env"
+        echo "     - Edit: nano /usr/local/r-panel/configs/config.yaml"
+        echo "     - If config.yaml doesn't exist, copy from example:"
+        echo "       cp /usr/local/r-panel/configs/config.example.yaml /usr/local/r-panel/configs/config.yaml"
         echo "  2. Run: mysql_secure_installation"
         echo "  3. Create database for R-Panel:"
         echo "     mysql -e \"CREATE DATABASE rpanel;\""
