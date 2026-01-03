@@ -9,7 +9,7 @@ server:
 
 # Database configuration
 database:
-  type: "sqlite" # sqlite or mysql
+  type: "mysql" # mysql or sqlite
   sqlite:
     path: "./data/rpanel.db"
   mysql:

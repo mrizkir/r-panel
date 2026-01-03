@@ -123,6 +123,16 @@ func Load(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("failed to create data directory: %w", err)
 		}
 	}
+	
+	// Validate MySQL configuration if MySQL is selected
+	if cfg.Database.Type == "mysql" {
+		if cfg.Database.MySQL.Username == "" {
+			return nil, fmt.Errorf("MySQL username is required")
+		}
+		if cfg.Database.MySQL.Database == "" {
+			return nil, fmt.Errorf("MySQL database name is required")
+		}
+	}
 
 	// Ensure backups directory exists
 	if err := os.MkdirAll(cfg.Paths.Backups, 0755); err != nil {
