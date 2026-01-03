@@ -27,19 +27,23 @@ func InitDB(cfg *config.Config) error {
 			cfg.Database.MySQL.Port,
 			cfg.Database.MySQL.Charset,
 		)
-		
+
 		tempDB, err := gorm.Open(mysql.Open(dsnWithoutDB), &gorm.Config{})
 		if err != nil {
 			return fmt.Errorf("failed to connect to MySQL server: %w", err)
 		}
-		
+
 		// Create database if it doesn't exist
-		tempDB.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET %s COLLATE %s_unicode_ci",
-			cfg.Database.MySQL.Database,
-			cfg.Database.MySQL.Charset,
-			cfg.Database.MySQL.Charset,
-		))
-		
+		sqlDB, _ := tempDB.DB()
+		if sqlDB != nil {
+			tempDB.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET %s COLLATE %s_unicode_ci",
+				cfg.Database.MySQL.Database,
+				cfg.Database.MySQL.Charset,
+				cfg.Database.MySQL.Charset,
+			))
+			sqlDB.Close()
+		}
+
 		// Now connect to the actual database
 		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s&parseTime=True&loc=Local",
 			cfg.Database.MySQL.Username,

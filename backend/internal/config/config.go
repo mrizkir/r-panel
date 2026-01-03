@@ -59,7 +59,7 @@ type RateLimitConfig struct {
 }
 
 type PathsConfig struct {
-	PHPFPM Pools      string `yaml:"php_fpm_pools"`
+	PHPFPM             string `yaml:"php_fpm_pools"`
 	NginxSitesAvailable string `yaml:"nginx_sites_available"`
 	NginxSitesEnabled   string `yaml:"nginx_sites_enabled"`
 	NginxLogs           string `yaml:"nginx_logs"`

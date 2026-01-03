@@ -8,11 +8,6 @@ import (
 	"gorm.io/gorm"
 )
 
-var (
-	ErrUserNotFound = errors.New("user not found")
-	ErrUserExists   = errors.New("user already exists")
-)
-
 type UserService struct {
 	authService *AuthService
 }

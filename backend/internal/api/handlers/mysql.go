@@ -44,7 +44,7 @@ type CreateDatabaseRequest struct {
 	Name string `json:"name" binding:"required"`
 }
 
-type CreateUserRequest struct {
+type CreateMySQLUserRequest struct {
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
 	Host     string `json:"host"`
@@ -112,7 +112,7 @@ func (h *MySQLHandler) GetUsers(c *gin.Context) {
 
 // CreateUser creates a new MySQL user
 func (h *MySQLHandler) CreateUser(c *gin.Context) {
-	var req CreateUserRequest
+	var req CreateMySQLUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"error": "Invalid request", "details": err.Error()})
 		return
