@@ -107,9 +107,16 @@ execute() {
     
     if [ "$VERBOSE_MODE" = true ]; then
         log_info "execute() called with: $description"
+        log_info "Current step before increment: $CURRENT_STEP"
     fi
     
-    ((CURRENT_STEP++))
+    # Increment step counter - use simple assignment to avoid set -e issues
+    CURRENT_STEP=$(($CURRENT_STEP + 1))
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Current step after increment: $CURRENT_STEP"
+    fi
+    
     show_progress "$description"
     
     if [ "$VERBOSE_MODE" = true ]; then
