@@ -1370,6 +1370,81 @@ EOF
     fi
 }
 
+# Setup SSL certificate for R-Panel
+setup_ssl_certificate() {
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Setting up SSL certificate for R-Panel..."
+    fi
+    
+    # Get R-Panel domain from config or use server name
+    local R_PANEL_DOMAIN="${SERVER_NAME:-panel.example.com}"
+    
+    # Skip if server name is not set or is default
+    if [ -z "$SERVER_NAME" ] || [ "$SERVER_NAME" = "default" ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_warning "Skipping SSL setup: Server name not configured or is 'default'"
+            log_info "To setup SSL later, run: certbot --nginx -d your-domain.com"
+        fi
+        return 0
+    fi
+    
+    # Check if certbot is installed
+    if ! command -v certbot &> /dev/null; then
+        log_warning "Certbot not found. SSL setup skipped."
+        return 0
+    fi
+    
+    # Check if domain resolves (basic DNS check)
+    if ! host "$R_PANEL_DOMAIN" &> /dev/null; then
+        log_warning "Domain $R_PANEL_DOMAIN does not resolve. SSL setup skipped."
+        log_info "Please configure DNS first, then run: certbot --nginx -d $R_PANEL_DOMAIN"
+        return 0
+    fi
+    
+    # Try to setup SSL certificate (non-blocking)
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Attempting to setup SSL certificate for $R_PANEL_DOMAIN..."
+        log_info "This may require email input. Use SSL_EMAIL environment variable to set email."
+    fi
+    
+    set +e
+    trap - ERR
+    
+    # Determine email for certbot
+    local CERTBOT_EMAIL="${SSL_EMAIL:-admin@${R_PANEL_DOMAIN}}"
+    
+    # Run certbot in non-interactive mode (will prompt for email if not provided)
+    # Use --agree-tos and --redirect for automatic setup
+    certbot --nginx -d "$R_PANEL_DOMAIN" \
+        --non-interactive \
+        --agree-tos \
+        --redirect \
+        --email "$CERTBOT_EMAIL" \
+        >> "$LOG_FILE" 2>&1
+    
+    local certbot_result=$?
+    set -e
+    trap 'error_exit $LINENO' ERR
+    
+    if [ $certbot_result -eq 0 ]; then
+        # Reload nginx after SSL setup
+        systemctl reload nginx >> "$LOG_FILE" 2>&1 || true
+        
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "SSL certificate setup successfully for $R_PANEL_DOMAIN"
+        fi
+    else
+        log_warning "SSL certificate setup failed for $R_PANEL_DOMAIN"
+        log_info "This is normal if:"
+        log_info "  - DNS is not configured yet"
+        log_info "  - Domain does not point to this server"
+        log_info "  - Port 80 is not accessible from internet"
+        log_info ""
+        log_info "To setup SSL manually later, run:"
+        log_info "  certbot --nginx -d $R_PANEL_DOMAIN"
+    fi
+}
+
 # Setup disk quota for client websites
 setup_disk_quota() {
     if [ "$VERBOSE_MODE" = true ]; then
@@ -2140,13 +2215,9 @@ StandardError=append:/usr/local/r-panel/logs/r-panel-error.log
 
 # Security (compatible with systems that have limited namespace support)
 NoNewPrivileges=true
-# Removed PrivateTmp, ProtectSystem, and ProtectHome to avoid namespace errors
-# These can cause exit code 226/NAMESPACE on some systems
-# File permissions are still enforced via User/Group and ReadOnlyPaths/ReadWritePaths
-# Allow read access to system logs and configs
-ReadOnlyPaths=/var/log /etc/nginx/nginx.conf /etc/php
-# Allow write access to specific directories needed by R-Panel
-ReadWritePaths=/usr/local/r-panel/data /usr/local/r-panel/logs /usr/local/r-panel/uploads /var/www/vhosts /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d /etc/php/*/fpm/pool.d
+# Removed PrivateTmp, ProtectSystem, ProtectHome, ReadOnlyPaths, and ReadWritePaths
+# to avoid namespace errors (exit code 226/NAMESPACE) on systems without namespace support
+# File permissions are still enforced via User/Group settings above
 
 [Install]
 WantedBy=multi-user.target
@@ -2450,6 +2521,7 @@ main() {
     configure_rpanel_permissions
     create_nginx_config
     create_rpanel_nginx_config
+    setup_ssl_certificate
     setup_disk_quota
     optimize_php_fpm
     create_swap
