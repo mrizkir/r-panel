@@ -68,6 +68,14 @@ NC='\033[0m' # No Color
 TOTAL_STEPS=15
 CURRENT_STEP=0
 
+# Server configuration
+SERVER_NAME=""
+SERVER_IP=""
+DETECTED_PUBLIC_IPS=()
+DETECTED_PRIVATE_IPS=()
+DETECTED_ALL_IPS=()
+DEFAULT_IP=""
+
 # Progress bar function
 show_progress() {
     if [ "$VERBOSE_MODE" = true ]; then
@@ -198,6 +206,224 @@ check_root() {
         log_error "This script must be run as root"
         exit 1
     fi
+}
+
+# Prompt for server name
+prompt_server_name() {
+    # Check if server name is already set via environment variable
+    if [ -n "$R_PANEL_SERVER_NAME" ]; then
+        SERVER_NAME="$R_PANEL_SERVER_NAME"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Server name set from environment: $SERVER_NAME"
+        fi
+        return 0
+    fi
+    
+    # Only prompt if we have a TTY (interactive mode)
+    if [ ! -t 0 ]; then
+        # Non-interactive mode, use hostname
+        SERVER_NAME=$(hostname -f 2>/dev/null || hostname)
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Non-interactive mode detected. Using hostname: $SERVER_NAME"
+        fi
+        return 0
+    fi
+    
+    echo ""
+    echo -e "${CYAN}=============================================${NC}"
+    echo -e "${CYAN}  Server Configuration${NC}"
+    echo -e "${CYAN}=============================================${NC}"
+    echo ""
+    echo -e "${YELLOW}Please enter your server name (domain or hostname):${NC}"
+    echo -e "${BLUE}Example: panel.example.com or server1.example.com${NC}"
+    echo ""
+    echo -n "Server name: "
+    read -r SERVER_NAME
+    
+    # Validate input
+    if [ -z "$SERVER_NAME" ]; then
+        # If empty, use hostname as default
+        SERVER_NAME=$(hostname -f 2>/dev/null || hostname)
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_warning "No server name provided. Using hostname: $SERVER_NAME"
+        fi
+    else
+        # Remove any whitespace
+        SERVER_NAME=$(echo "$SERVER_NAME" | xargs)
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Server name set to: $SERVER_NAME"
+        fi
+    fi
+    
+    echo ""
+    echo -e "${GREEN}Using server name: ${SERVER_NAME}${NC}"
+    echo ""
+}
+
+# Detect available IP addresses
+detect_ip_addresses() {
+    local PUBLIC_IPS=()
+    local PRIVATE_IPS=()
+    local ALL_IPS=()
+    
+    # Get all IP addresses from network interfaces
+    if command -v ip > /dev/null 2>&1; then
+        # Using ip command (preferred)
+        while IFS= read -r line; do
+            local ip=$(echo "$line" | awk '{print $2}' | cut -d'/' -f1)
+            if [ -n "$ip" ] && [ "$ip" != "127.0.0.1" ] && [ "$ip" != "::1" ]; then
+                ALL_IPS+=("$ip")
+                # Check if it's a private IP
+                if [[ "$ip" =~ ^10\. ]] || \
+                   [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] || \
+                   [[ "$ip" =~ ^192\.168\. ]] || \
+                   [[ "$ip" =~ ^169\.254\. ]]; then
+                    PRIVATE_IPS+=("$ip")
+                else
+                    PUBLIC_IPS+=("$ip")
+                fi
+            fi
+        done < <(ip -4 addr show 2>/dev/null | grep "inet ")
+    elif command -v ifconfig > /dev/null 2>&1; then
+        # Using ifconfig as fallback
+        while IFS= read -r line; do
+            local ip=$(echo "$line" | grep -oE 'inet [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | awk '{print $2}')
+            if [ -n "$ip" ] && [ "$ip" != "127.0.0.1" ]; then
+                ALL_IPS+=("$ip")
+                # Check if it's a private IP
+                if [[ "$ip" =~ ^10\. ]] || \
+                   [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] || \
+                   [[ "$ip" =~ ^192\.168\. ]] || \
+                   [[ "$ip" =~ ^169\.254\. ]]; then
+                    PRIVATE_IPS+=("$ip")
+                else
+                    PUBLIC_IPS+=("$ip")
+                fi
+            fi
+        done < <(ifconfig 2>/dev/null | grep "inet ")
+    else
+        # Fallback to hostname -I
+        local hostname_ips=$(hostname -I 2>/dev/null | tr ' ' '\n')
+        while IFS= read -r ip; do
+            if [ -n "$ip" ] && [ "$ip" != "127.0.0.1" ]; then
+                ALL_IPS+=("$ip")
+                # Check if it's a private IP
+                if [[ "$ip" =~ ^10\. ]] || \
+                   [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] || \
+                   [[ "$ip" =~ ^192\.168\. ]] || \
+                   [[ "$ip" =~ ^169\.254\. ]]; then
+                    PRIVATE_IPS+=("$ip")
+                else
+                    PUBLIC_IPS+=("$ip")
+                fi
+            fi
+        done <<< "$hostname_ips"
+    fi
+    
+    # Return results via global variables (bash doesn't support returning arrays easily)
+    DETECTED_PUBLIC_IPS=("${PUBLIC_IPS[@]}")
+    DETECTED_PRIVATE_IPS=("${PRIVATE_IPS[@]}")
+    DETECTED_ALL_IPS=("${ALL_IPS[@]}")
+    
+    # Determine default IP
+    if [ ${#PUBLIC_IPS[@]} -gt 0 ]; then
+        DEFAULT_IP="${PUBLIC_IPS[0]}"
+    elif [ ${#PRIVATE_IPS[@]} -gt 0 ]; then
+        DEFAULT_IP="${PRIVATE_IPS[0]}"
+    else
+        DEFAULT_IP="127.0.0.1"
+    fi
+}
+
+# Prompt for server IP address
+prompt_server_ip() {
+    # Check if server IP is already set via environment variable
+    if [ -n "$R_PANEL_SERVER_IP" ]; then
+        SERVER_IP="$R_PANEL_SERVER_IP"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Server IP set from environment: $SERVER_IP"
+        fi
+        return 0
+    fi
+    
+    # Detect available IP addresses
+    detect_ip_addresses
+    
+    # Only prompt if we have a TTY (interactive mode)
+    if [ ! -t 0 ]; then
+        # Non-interactive mode, use default IP
+        SERVER_IP="$DEFAULT_IP"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Non-interactive mode detected. Using default IP: $SERVER_IP"
+        fi
+        return 0
+    fi
+    
+    echo ""
+    echo -e "${CYAN}=============================================${NC}"
+    echo -e "${CYAN}  Server IP Address Configuration${NC}"
+    echo -e "${CYAN}=============================================${NC}"
+    echo ""
+    
+    # Display available IP addresses
+    if [ ${#DETECTED_ALL_IPS[@]} -gt 0 ]; then
+        echo -e "${YELLOW}Available IP addresses on this system:${NC}"
+        echo ""
+        
+        local index=1
+        if [ ${#DETECTED_PUBLIC_IPS[@]} -gt 0 ]; then
+            echo -e "${GREEN}Public IP addresses:${NC}"
+            for ip in "${DETECTED_PUBLIC_IPS[@]}"; do
+                echo -e "  ${GREEN}[$index]${NC} $ip ${BLUE}(Public)${NC}"
+                ((index++))
+            done
+            echo ""
+        fi
+        
+        if [ ${#DETECTED_PRIVATE_IPS[@]} -gt 0 ]; then
+            echo -e "${YELLOW}Private IP addresses:${NC}"
+            for ip in "${DETECTED_PRIVATE_IPS[@]}"; do
+                echo -e "  ${YELLOW}[$index]${NC} $ip ${BLUE}(Private)${NC}"
+                ((index++))
+            done
+            echo ""
+        fi
+    else
+        echo -e "${YELLOW}No IP addresses detected. Using localhost.${NC}"
+        echo ""
+    fi
+    
+    echo -e "${YELLOW}Please enter the IP address to use:${NC}"
+    echo -e "${BLUE}Default: $DEFAULT_IP${NC}"
+    echo ""
+    echo -n "Server IP address [$DEFAULT_IP]: "
+    read -r SERVER_IP
+    
+    # Validate input
+    if [ -z "$SERVER_IP" ]; then
+        # If empty, use default
+        SERVER_IP="$DEFAULT_IP"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "No IP address provided. Using default: $SERVER_IP"
+        fi
+    else
+        # Remove any whitespace
+        SERVER_IP=$(echo "$SERVER_IP" | xargs)
+        
+        # Validate IP format (basic validation)
+        if [[ ! "$SERVER_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            log_warning "Invalid IP format. Using default: $DEFAULT_IP"
+            SERVER_IP="$DEFAULT_IP"
+        else
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Server IP set to: $SERVER_IP"
+            fi
+        fi
+    fi
+    
+    echo ""
+    echo -e "${GREEN}Using server IP: ${SERVER_IP}${NC}"
+    echo ""
 }
 
 # Detect OS
@@ -597,8 +823,18 @@ create_nginx_config() {
         log_info "Creating Nginx configuration..."
     fi
     
+    # Backup existing default config if it exists
+    if [ -f /etc/nginx/sites-available/default ]; then
+        cp /etc/nginx/sites-available/default /etc/nginx/sites-available/default.backup.$(date +%Y%m%d_%H%M%S) >> "$LOG_FILE" 2>&1 || true
+    fi
+    
+    # Use server name if provided, otherwise use default
+    if [ -z "$SERVER_NAME" ]; then
+        SERVER_NAME="default"
+    fi
+    
     # Create a basic default configuration for user websites
-    cat > /etc/nginx/sites-available/default <<'EOF'
+    cat > /etc/nginx/sites-available/default <<EOF
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
@@ -606,13 +842,14 @@ server {
     root /var/www/html;
     index index.html index.htm index.php;
     
-    server_name _;
+    # Server name from user input
+    server_name $SERVER_NAME;
     
     location / {
-        try_files $uri $uri/ =404;
+        try_files \$uri \$uri/ =404;
     }
     
-    location ~ \.php$ {
+    location ~ \.php\$ {
         include snippets/fastcgi-php.conf;
         fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
     }
@@ -626,11 +863,21 @@ EOF
     # Enable the default site
     ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default >> "$LOG_FILE" 2>&1
     
-    # Test and reload Nginx
-    nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx >> "$LOG_FILE" 2>&1
+    # Test and reload Nginx (suppress warnings about conflicting server names)
+    set +e
+    nginx -t >> "$LOG_FILE" 2>&1
+    local nginx_test_result=$?
+    set -e
     
-    if [ "$VERBOSE_MODE" = true ]; then
-        log_success "Nginx configuration created"
+    # Check if nginx test passed (exit code 0 means success, even with warnings)
+    if [ $nginx_test_result -eq 0 ]; then
+        systemctl reload nginx >> "$LOG_FILE" 2>&1
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "Nginx configuration created"
+        fi
+    else
+        log_error "Nginx configuration test failed. Check logs: $LOG_FILE"
+        return 1
     fi
 }
 
@@ -695,14 +942,18 @@ detect_rpanel_source() {
     local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     
     # Check if we're inside r-panel repository (Go project)
-    if [ -f "$SCRIPT_DIR/go.mod" ] || [ -f "$SCRIPT_DIR/main.go" ] || [ -d "$SCRIPT_DIR/.git" ]; then
+    # Check for go.mod in root or backend directory
+    if [ -f "$SCRIPT_DIR/go.mod" ] || [ -f "$SCRIPT_DIR/backend/go.mod" ] || \
+       [ -f "$SCRIPT_DIR/main.go" ] || [ -f "$SCRIPT_DIR/backend/cmd/server/main.go" ] || \
+       [ -d "$SCRIPT_DIR/.git" ]; then
         echo "$SCRIPT_DIR"
         return 0
     fi
     
     # Check parent directory (in case script is in subdirectory)
     local PARENT_DIR="$(dirname "$SCRIPT_DIR")"
-    if [ -f "$PARENT_DIR/go.mod" ] || [ -f "$PARENT_DIR/main.go" ]; then
+    if [ -f "$PARENT_DIR/go.mod" ] || [ -f "$PARENT_DIR/backend/go.mod" ] || \
+       [ -f "$PARENT_DIR/main.go" ] || [ -f "$PARENT_DIR/backend/cmd/server/main.go" ]; then
         echo "$PARENT_DIR"
         return 0
     fi
@@ -754,18 +1005,47 @@ compile_and_install_rpanel() {
         fi
     fi
     
-    # Build Go application
-    if [ -f "main.go" ] || [ -f "cmd/main.go" ]; then
+    # Build Go application - search for main.go in various locations
+    MAIN_PATH=""
+    if [ -f "backend/cmd/server/main.go" ]; then
+        MAIN_PATH="./backend/cmd/server"
         if [ "$VERBOSE_MODE" = true ]; then
-            log_info "Building Go application..."
+            log_info "Found main.go at: backend/cmd/server/main.go"
+        fi
+    elif [ -f "cmd/server/main.go" ]; then
+        MAIN_PATH="./cmd/server"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Found main.go at: cmd/server/main.go"
+        fi
+    elif [ -f "cmd/main.go" ]; then
+        MAIN_PATH="./cmd"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Found main.go at: cmd/main.go"
+        fi
+    elif [ -f "main.go" ]; then
+        MAIN_PATH="."
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Found main.go at: main.go"
+        fi
+    fi
+    
+    if [ -n "$MAIN_PATH" ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Building Go application from: $MAIN_PATH"
         fi
         
-        # Determine main file location
-        if [ -f "cmd/main.go" ]; then
-            MAIN_PATH="./cmd"
-        else
-            MAIN_PATH="."
+        # Determine build directory and main path
+        BUILD_DIR="$SOURCE_DIR"
+        if [ -f "$SOURCE_DIR/backend/go.mod" ]; then
+            BUILD_DIR="$SOURCE_DIR/backend"
+            MAIN_PATH="./cmd/server"
+        elif [ -f "$SOURCE_DIR/go.mod" ]; then
+            BUILD_DIR="$SOURCE_DIR"
+            # MAIN_PATH already set above
         fi
+        
+        # Change to build directory
+        cd "$BUILD_DIR"
         
         # Build with optimizations
         CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
@@ -775,15 +1055,25 @@ compile_and_install_rpanel() {
         
         if [ ! -f "r-panel" ]; then
             log_error "Go build failed. Check logs: $LOG_FILE"
-            cd - >> "$LOG_FILE" 2>&1
+            cd "$SOURCE_DIR" >> "$LOG_FILE" 2>&1
             return 1
+        fi
+        
+        # Move binary to source directory for installation
+        if [ "$BUILD_DIR" != "$SOURCE_DIR" ]; then
+            mv r-panel "$SOURCE_DIR/r-panel" >> "$LOG_FILE" 2>&1
+            cd "$SOURCE_DIR"
         fi
         
         if [ "$VERBOSE_MODE" = true ]; then
             log_success "Go application compiled successfully"
         fi
     else
-        log_error "No main.go file found"
+        log_error "No main.go file found. Searched in:"
+        log_error "  - backend/cmd/server/main.go"
+        log_error "  - cmd/server/main.go"
+        log_error "  - cmd/main.go"
+        log_error "  - main.go"
         cd - >> "$LOG_FILE" 2>&1
         return 1
     fi
@@ -798,17 +1088,29 @@ compile_and_install_rpanel() {
     # Copy compiled binary and required files
     cp r-panel /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
     
-    # Copy static files, templates, config, etc.
+    # Copy static files, templates, config, etc. (check both root and backend)
     for dir in static templates public assets config web; do
         if [ -d "$dir" ]; then
             cp -r "$dir" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+        elif [ -d "backend/$dir" ]; then
+            cp -r "backend/$dir" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
         fi
     done
     
-    # Copy config files if exist
+    # Copy backend-specific directories
+    if [ -d "backend/templates" ]; then
+        cp -r backend/templates /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+    fi
+    if [ -d "backend/configs" ]; then
+        cp -r backend/configs /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+    fi
+    
+    # Copy config files if exist (check both root and backend)
     for file in config.yaml config.yml .env.example config.toml; do
         if [ -f "$file" ]; then
             cp "$file" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+        elif [ -f "backend/$file" ]; then
+            cp "backend/$file" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
         fi
     done
     
@@ -902,6 +1204,16 @@ display_info() {
     echo "  R-Panel Installation Summary"
     echo "=============================================="
     echo ""
+    if [ -n "$SERVER_NAME" ] || [ -n "$SERVER_IP" ]; then
+        echo "Server Configuration:"
+        if [ -n "$SERVER_NAME" ]; then
+            echo "  • Server Name: $SERVER_NAME"
+        fi
+        if [ -n "$SERVER_IP" ]; then
+            echo "  • Server IP: $SERVER_IP"
+        fi
+        echo ""
+    fi
     echo "Installed Components:"
     echo "  ✓ Nginx: $(nginx -v 2>&1 | cut -d'/' -f2)"
     echo "  ✓ PHP: $(php -v | head -n 1 | cut -d' ' -f2)"
@@ -935,14 +1247,21 @@ display_info() {
     
     echo ""
     
-    # Get server IP
-    SERVER_IP=$(hostname -I | awk '{print $1}')
+    # Use configured server IP or detect if not set
+    if [ -z "$SERVER_IP" ]; then
+        SERVER_IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "127.0.0.1")
+    fi
     
     if [ -d /usr/local/r-panel ]; then
         echo "Access R-Panel:"
         echo "  • Direct Access: http://$SERVER_IP:8080"
-        echo "  • With Domain: http://your-domain.com:8080"
-        echo "  • With SSL: https://your-domain.com:8080"
+        if [ -n "$SERVER_NAME" ] && [ "$SERVER_NAME" != "default" ]; then
+            echo "  • With Domain: http://$SERVER_NAME:8080"
+            echo "  • With SSL: https://$SERVER_NAME:8080"
+        else
+            echo "  • With Domain: http://your-domain.com:8080"
+            echo "  • With SSL: https://your-domain.com:8080"
+        fi
         echo ""
         echo "NOTE: Clients will access R-Panel on their own domains:"
         echo "      https://client1.com:8080"
@@ -1032,6 +1351,18 @@ main() {
     
     check_root
     detect_os
+    
+    # Prompt for server name
+    prompt_server_name
+    
+    # Log server name
+    echo "Server name: $SERVER_NAME" >> "$LOG_FILE"
+    
+    # Prompt for server IP address
+    prompt_server_ip
+    
+    # Log server IP
+    echo "Server IP: $SERVER_IP" >> "$LOG_FILE"
     
     # Show initial progress if in quiet mode
     if [ "$VERBOSE_MODE" = false ]; then
