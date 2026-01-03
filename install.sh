@@ -647,7 +647,9 @@ install_utilities() {
         openssl \
         ca-certificates \
         gnupg \
-        lsb-release
+        lsb-release \
+        quota \
+        quota-tools
     
     if [ "$VERBOSE_MODE" = true ]; then
         log_success "Basic utilities installed"
@@ -1267,8 +1269,6 @@ server {
 #}
 EOF
 
-EOF
-
     # Enable the site
     set +e
     ln -sf /etc/nginx/sites-available/r-panel /etc/nginx/sites-enabled/r-panel 2>> "$LOG_FILE" || true
@@ -1292,6 +1292,164 @@ EOF
             log_info "This is normal if SSL certificate is not setup yet"
             log_info "Setup SSL certificate with: certbot --nginx -d ${R_PANEL_DOMAIN}"
         fi
+    fi
+}
+
+# Setup disk quota for client websites
+setup_disk_quota() {
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Setting up disk quota for client websites..."
+    fi
+    
+    # Check if quota is already enabled
+    if mount | grep -q "usrquota\|grpquota"; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Quota already enabled on filesystem"
+        fi
+    else
+        # Find root filesystem
+        ROOT_FS=$(df /var/www | tail -1 | awk '{print $1}')
+        ROOT_MOUNT=$(df /var/www | tail -1 | awk '{print $6}')
+        
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Root filesystem: $ROOT_FS mounted on $ROOT_MOUNT"
+        fi
+        
+        # Backup fstab
+        if [ ! -f /etc/fstab.backup ]; then
+            cp /etc/fstab /etc/fstab.backup >> "$LOG_FILE" 2>&1
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Backed up /etc/fstab to /etc/fstab.backup"
+            fi
+        fi
+        
+        # Check if quota options already in fstab
+        if grep -q "$ROOT_FS.*usrquota\|grpquota" /etc/fstab; then
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Quota options already in /etc/fstab"
+            fi
+        else
+            # Add quota options to fstab
+            # Find the line for root filesystem and add usrquota,grpquota
+            set +e
+            sed -i "s|^\($ROOT_FS.*defaults\)|\1,usrquota,grpquota|" /etc/fstab 2>> "$LOG_FILE"
+            local sed_result=$?
+            set -e
+            
+            if [ $sed_result -eq 0 ]; then
+                if [ "$VERBOSE_MODE" = true ]; then
+                    log_success "Added quota options to /etc/fstab"
+                fi
+                log_warning "Quota options added to /etc/fstab. Remount required:"
+                log_warning "  mount -o remount $ROOT_MOUNT"
+                log_warning "  Or reboot the server"
+            else
+                log_warning "Failed to automatically add quota to /etc/fstab"
+                log_warning "Please manually add 'usrquota,grpquota' to $ROOT_FS in /etc/fstab"
+            fi
+        fi
+    fi
+    
+    # Create quota files if they don't exist
+    set +e
+    touch /aquota.user /aquota.group >> "$LOG_FILE" 2>&1 || true
+    chmod 600 /aquota.user /aquota.group >> "$LOG_FILE" 2>&1 || true
+    set -e
+    
+    # Initialize quota database
+    set +e
+    quotacheck -ugm / >> "$LOG_FILE" 2>&1 || true
+    quotaon -ug / >> "$LOG_FILE" 2>&1 || true
+    set -e
+    
+    # Setup default quota for www-data group (all client websites)
+    # Default: 10GB soft limit, 11GB hard limit
+    set +e
+    setquota -g www-data 0 10485760 0 11264 / >> "$LOG_FILE" 2>&1 || true
+    # 0 = unlimited inodes, 10485760 = 10GB in KB, 0 = unlimited inodes, 11264 = 11GB in KB
+    set -e
+    
+    # Create quota management script
+    cat > /usr/local/bin/r-panel-set-quota <<'EOF'
+#!/bin/bash
+# R-Panel Quota Management Script
+# Usage: r-panel-set-quota <username|groupname> <soft_limit_GB> <hard_limit_GB> [user|group]
+
+if [ "$EUID" -ne 0 ]; then 
+    echo "Please run as root"
+    exit 1
+fi
+
+if [ $# -lt 3 ]; then
+    echo "Usage: $0 <username|groupname> <soft_limit_GB> <hard_limit_GB> [user|group]"
+    echo "Example: $0 client1 5 6 user"
+    echo "Example: $0 www-data 10 11 group"
+    exit 1
+fi
+
+TARGET=$1
+SOFT_GB=$2
+HARD_GB=$3
+TYPE=${4:-user}
+
+# Convert GB to KB
+SOFT_KB=$((SOFT_GB * 1024 * 1024))
+HARD_KB=$((HARD_GB * 1024 * 1024))
+
+if [ "$TYPE" = "user" ]; then
+    if ! id "$TARGET" &>/dev/null; then
+        echo "Error: User $TARGET does not exist"
+        exit 1
+    fi
+    setquota -u "$TARGET" 0 "$SOFT_KB" 0 "$HARD_KB" /
+    echo "Set quota for user $TARGET: ${SOFT_GB}GB soft, ${HARD_GB}GB hard"
+elif [ "$TYPE" = "group" ]; then
+    if ! getent group "$TARGET" &>/dev/null; then
+        echo "Error: Group $TARGET does not exist"
+        exit 1
+    fi
+    setquota -g "$TARGET" 0 "$SOFT_KB" 0 "$HARD_KB" /
+    echo "Set quota for group $TARGET: ${SOFT_GB}GB soft, ${HARD_GB}GB hard"
+else
+    echo "Error: Type must be 'user' or 'group'"
+    exit 1
+fi
+
+# Report quota
+if [ "$TYPE" = "user" ]; then
+    quota -u "$TARGET"
+else
+    quota -g "$TARGET"
+fi
+EOF
+
+    chmod +x /usr/local/bin/r-panel-set-quota >> "$LOG_FILE" 2>&1
+    
+    # Create quota report script
+    cat > /usr/local/bin/r-panel-quota-report <<'EOF'
+#!/bin/bash
+# R-Panel Quota Report Script
+# Shows quota usage for all users and groups
+
+echo "=== User Quotas ==="
+repquota -u / 2>/dev/null | grep -v "^$" | head -20
+
+echo ""
+echo "=== Group Quotas ==="
+repquota -g / 2>/dev/null | grep -v "^$" | head -20
+
+echo ""
+echo "=== www-data Group Quota (Client Websites) ==="
+quota -g www-data 2>/dev/null || echo "No quota set for www-data group"
+EOF
+
+    chmod +x /usr/local/bin/r-panel-quota-report >> "$LOG_FILE" 2>&1
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Disk quota system configured"
+        log_info "Default quota for www-data group: 10GB soft, 11GB hard"
+        log_info "Use 'r-panel-set-quota <user|group> <soft_GB> <hard_GB> [user|group]' to set quota"
+        log_info "Use 'r-panel-quota-report' to view quota usage"
     fi
 }
 
@@ -1871,6 +2029,17 @@ display_info() {
     
     echo "  • View logs: tail -f /usr/local/r-panel/logs/*.log"
     echo "  • Nginx test: nginx -t"
+    echo ""
+    echo "Disk Quota Management:"
+    echo "  • Set quota: r-panel-set-quota <user|group> <soft_GB> <hard_GB> [user|group]"
+    echo "    Example: r-panel-set-quota client1 5 6 user"
+    echo "    Example: r-panel-set-quota www-data 10 11 group"
+    echo "  • View quota report: r-panel-quota-report"
+    echo "  • Check user quota: quota -u <username>"
+    echo "  • Check group quota: quota -g <groupname>"
+    echo "  • Note: If quota not working, remount filesystem:"
+    echo "    mount -o remount /"
+    echo "    quotaon -ug /"
     
     if [ -d /usr/local/r-panel ]; then
         echo "  • R-Panel CLI: r-panel --help"
@@ -1975,6 +2144,7 @@ main() {
     configure_rpanel_permissions
     create_nginx_config
     create_rpanel_nginx_config
+    setup_disk_quota
     optimize_php_fpm
     create_swap
     
