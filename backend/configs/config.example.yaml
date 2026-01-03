@@ -1,0 +1,49 @@
+# R-Panel Configuration Example File
+# Copy this file to config.yaml and adjust settings
+
+# Server settings
+server:
+  host: "0.0.0.0"
+  port: 8080
+  mode: "debug" # debug, release
+
+# Database configuration
+database:
+  type: "sqlite" # sqlite or mysql
+  sqlite:
+    path: "./data/rpanel.db"
+  mysql:
+    host: "localhost"
+    port: 3306
+    username: "rpanel"
+    password: ""
+    database: "rpanel"
+    charset: "utf8mb4"
+
+# JWT Authentication
+jwt:
+  secret: "" # Set via RPANEL_JWT_SECRET env var or generate on first run
+  expires_in: 24h # Token expiration time
+  issuer: "r-panel"
+
+# Security
+security:
+  bcrypt_cost: 10
+  rate_limit:
+    enabled: true
+    requests_per_minute: 60
+
+# Paths
+paths:
+  php_fpm_pools: "/etc/php/*/fpm/pool.d/"
+  nginx_sites_available: "/etc/nginx/sites-available"
+  nginx_sites_enabled: "/etc/nginx/sites-enabled"
+  nginx_logs: "/var/log/nginx"
+  backups: "./data/backups"
+
+# Default user (created on first run if not exists)
+default_user:
+  username: "admin"
+  password: "changeme" # MUST be changed on first login
+  role: "admin"
+

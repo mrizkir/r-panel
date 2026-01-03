@@ -183,8 +183,8 @@ go run cmd/server/main.go migrate
 
 # 6. Build frontend
 cd ../frontend
-npm install
-npm run build
+yarn install
+yarn build
 
 # 7. Start R-Panel
 cd ../backend
@@ -374,7 +374,7 @@ go run cmd/server/main.go
 
 # Frontend (Vite dev server)
 cd frontend
-npm run dev
+yarn dev
 ```
 
 ---

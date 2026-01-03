@@ -1,5 +1,40 @@
-# Vue 3 + Vite
+# R-Panel Frontend
 
-This template should help get you started developing with Vue 3 in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Frontend application for R-Panel built with Vue 3, Vuetify, and Vite.
 
-Learn more about IDE Support for Vue in the [Vue Docs Scaling up Guide](https://vuejs.org/guide/scaling-up/tooling.html#ide-support).
+## Prerequisites
+
+- Node.js 20.19+ or 22.12+
+- Yarn package manager
+
+## Installation
+
+```bash
+# Install dependencies
+yarn install
+```
+
+## Development
+
+```bash
+# Start development server
+yarn dev
+```
+
+The development server will start at `http://localhost:5173` (default Vite port).
+
+## Build
+
+```bash
+# Build for production
+yarn build
+```
+
+The built files will be output to `../backend/web/dist/` directory.
+
+## Preview
+
+```bash
+# Preview production build
+yarn preview
+```

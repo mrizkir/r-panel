@@ -1,32 +1,46 @@
 package main
 
 import (
-	"net/http"
+	"fmt"
+	"log"
 	"path/filepath"
+
+	"r-panel/internal/api/routes"
+	"r-panel/internal/config"
+	"r-panel/internal/models"
+	"r-panel/internal/services"
 
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
-	// Set Gin to release mode in production
-	// gin.SetMode(gin.ReleaseMode)
+	// Load configuration
+	cfg, err := config.Load("configs/config.yaml")
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
 
+	// Initialize database
+	if err := models.InitDB(cfg); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+
+	// Create default user if database is empty
+	authService := services.NewAuthService(cfg)
+	if err := authService.CreateDefaultUser(); err != nil {
+		log.Printf("Warning: Failed to create default user: %v", err)
+	}
+
+	// Set Gin mode
+	if cfg.Server.Mode == "release" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
+	// Create router
 	r := gin.Default()
 
-	// Setup API routes
-	api := r.Group("/api")
-	{
-		api.GET("/health", func(c *gin.Context) {
-			c.JSON(200, gin.H{
-				"status":  "ok",
-				"message": "R-Panel API is running",
-			})
-		})
-		// TODO: Add more API routes here
-		// api.POST("/auth/login", handlers.Login)
-		// api.GET("/admin/clients", handlers.GetClients)
-		// etc...
-	}
+	// Setup routes
+	routes.SetupRoutes(r, cfg)
 
 	// Serve static files from web/dist directory
 	frontendDir := filepath.Join("web", "dist")
@@ -51,6 +65,10 @@ func main() {
 		c.File(filepath.Join(frontendDir, "index.html"))
 	})
 
-	// Run server on port 8080
-	r.Run(":8080")
+	// Run server
+	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	log.Printf("Starting R-Panel server on %s", addr)
+	if err := r.Run(addr); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
+	}
 }
