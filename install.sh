@@ -846,7 +846,6 @@ configure_firewall() {
     ufw allow 80/tcp >> "$LOG_FILE" 2>&1
     ufw allow 443/tcp >> "$LOG_FILE" 2>&1
     ufw allow 8080/tcp >> "$LOG_FILE" 2>&1  # R-Panel port
-    ufw allow 3306/tcp >> "$LOG_FILE" 2>&1  # MySQL (optional, for remote access)
     
     # Enable firewall
     echo "y" | ufw enable >> "$LOG_FILE" 2>&1
@@ -893,6 +892,44 @@ EOF
     fi
 }
 
+# Create R-Panel system user
+create_rpanel_user() {
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Creating R-Panel system user..."
+    fi
+    
+    # Check if user already exists
+    if id "rpanel" &>/dev/null; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "User 'rpanel' already exists"
+        fi
+    else
+        # Create system user without home directory (like mysql user)
+        set +e
+        useradd -r -s /bin/false -d /nonexistent -c "R-Panel System User" rpanel >> "$LOG_FILE" 2>&1
+        local user_result=$?
+        set -e
+        
+        if [ $user_result -eq 0 ]; then
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_success "User 'rpanel' created successfully"
+            fi
+        else
+            log_error "Failed to create user 'rpanel'"
+            return 1
+        fi
+    fi
+    
+    # Add rpanel to groups that have read access to logs
+    set +e
+    usermod -a -G adm,systemd-journal rpanel >> "$LOG_FILE" 2>&1 || true
+    set -e
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "R-Panel user configured"
+    fi
+}
+
 # Create R-Panel directory structure
 create_rpanel_structure() {
     if [ "$VERBOSE_MODE" = true ]; then
@@ -916,11 +953,80 @@ create_rpanel_structure() {
     mkdir -p /var/www/vhosts >> "$LOG_FILE" 2>&1
     
     # Set permissions
-    chown -R www-data:www-data /var/www >> "$LOG_FILE" 2>&1
-    chmod -R 755 /var/www >> "$LOG_FILE" 2>&1
+    # /opt/r-panel owned by rpanel (for R-Panel application)
+    chown -R rpanel:rpanel /opt/r-panel >> "$LOG_FILE" 2>&1 || true
+    chmod -R 755 /opt/r-panel >> "$LOG_FILE" 2>&1 || true
+    
+    # /var/www owned by www-data (for client websites)
+    chown -R www-data:www-data /var/www >> "$LOG_FILE" 2>&1 || true
+    chmod -R 755 /var/www >> "$LOG_FILE" 2>&1 || true
     
     if [ "$VERBOSE_MODE" = true ]; then
         log_success "R-Panel directory structure created"
+    fi
+}
+
+# Configure permissions for R-Panel to access system files
+configure_rpanel_permissions() {
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Configuring permissions for R-Panel user (rpanel)..."
+    fi
+    
+    # Set permissions for log directories (allow rpanel to read via group membership)
+    set +e
+    chmod 755 /var/log >> "$LOG_FILE" 2>&1 || true
+    chmod 644 /var/log/*.log 2>> "$LOG_FILE" || true
+    chmod 755 /var/log/nginx >> "$LOG_FILE" 2>&1 || true
+    chmod 644 /var/log/nginx/*.log 2>> "$LOG_FILE" || true
+    set -e
+    
+    # Create sudo rules for rpanel user to manage system configurations
+    # This allows R-Panel to update nginx, php-fpm configs, and restart services
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Creating sudo rules for rpanel user..."
+    fi
+    
+    cat > /etc/sudoers.d/r-panel <<'EOF'
+# R-Panel sudo rules for rpanel system user
+# Allow rpanel to manage nginx configuration
+rpanel ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload nginx
+rpanel ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart nginx
+rpanel ALL=(ALL) NOPASSWD: /usr/sbin/nginx -t
+rpanel ALL=(ALL) NOPASSWD: /bin/cp /etc/nginx/sites-available/* /etc/nginx/sites-available/*
+rpanel ALL=(ALL) NOPASSWD: /bin/mv /etc/nginx/sites-available/* /etc/nginx/sites-available/*
+rpanel ALL=(ALL) NOPASSWD: /bin/rm /etc/nginx/sites-available/*
+rpanel ALL=(ALL) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
+rpanel ALL=(ALL) NOPASSWD: /bin/rm /etc/nginx/sites-enabled/*
+
+# Allow rpanel to manage PHP-FPM
+rpanel ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload php*-fpm
+rpanel ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart php*-fpm
+rpanel ALL=(ALL) NOPASSWD: /bin/cp /etc/php/*/fpm/pool.d/* /etc/php/*/fpm/pool.d/*
+rpanel ALL=(ALL) NOPASSWD: /bin/mv /etc/php/*/fpm/pool.d/* /etc/php/*/fpm/pool.d/*
+rpanel ALL=(ALL) NOPASSWD: /bin/rm /etc/php/*/fpm/pool.d/*
+
+# Allow rpanel to read system logs (no sudo needed, handled by group membership)
+EOF
+
+    # Set proper permissions for sudoers file
+    chmod 440 /etc/sudoers.d/r-panel >> "$LOG_FILE" 2>&1 || true
+    
+    # Set group ownership for nginx and php config directories
+    set +e
+    chgrp -R rpanel /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d 2>> "$LOG_FILE" || true
+    chmod -R g+w /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d 2>> "$LOG_FILE" || true
+    
+    # For PHP-FPM pool.d directories
+    for phpdir in /etc/php/*/fpm/pool.d; do
+        if [ -d "$phpdir" ]; then
+            chgrp rpanel "$phpdir" 2>> "$LOG_FILE" || true
+            chmod g+w "$phpdir" 2>> "$LOG_FILE" || true
+        fi
+    done
+    set -e
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "R-Panel permissions configured for rpanel user"
     fi
 }
 
@@ -1250,9 +1356,9 @@ compile_and_install_rpanel() {
     fi
     set -e
     
-    # Set proper permissions
+    # Set proper permissions (owned by rpanel user)
     set +e
-    chown -R www-data:www-data /usr/local/r-panel >> "$LOG_FILE" 2>&1 || true
+    chown -R rpanel:rpanel /usr/local/r-panel >> "$LOG_FILE" 2>&1 || true
     chmod -R 755 /usr/local/r-panel >> "$LOG_FILE" 2>&1 || true
     chmod +x /usr/local/r-panel/r-panel >> "$LOG_FILE" 2>&1 || true
     set -e
@@ -1260,7 +1366,7 @@ compile_and_install_rpanel() {
     # Create data directories if needed
     set +e
     mkdir -p /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1 || true
-    chown -R www-data:www-data /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1 || true
+    chown -R rpanel:rpanel /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1 || true
     chmod -R 775 /usr/local/r-panel/{data,logs,uploads} >> "$LOG_FILE" 2>&1 || true
     set -e
     
@@ -1282,8 +1388,8 @@ Requires=mysql.service
 
 [Service]
 Type=simple
-User=www-data
-Group=www-data
+User=rpanel
+Group=rpanel
 WorkingDirectory=/usr/local/r-panel
 Environment="PORT=8080"
 Environment="GIN_MODE=release"
@@ -1296,9 +1402,12 @@ StandardError=append:/opt/r-panel/logs/r-panel-error.log
 # Security
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
+ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/usr/local/r-panel/data /usr/local/r-panel/logs /usr/local/r-panel/uploads /opt/r-panel/logs /var/www/vhosts
+# Allow read access to system logs and configs
+ReadOnlyPaths=/var/log /etc/nginx/nginx.conf /etc/php
+# Allow write access to specific directories needed by R-Panel
+ReadWritePaths=/usr/local/r-panel/data /usr/local/r-panel/logs /usr/local/r-panel/uploads /opt/r-panel/logs /var/www/vhosts /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d /etc/php/*/fpm/pool.d
 
 [Install]
 WantedBy=multi-user.target
@@ -1452,7 +1561,6 @@ display_info() {
     echo "  • 80   - HTTP (User Websites)"
     echo "  • 443  - HTTPS (User Websites)"
     echo "  • 8080 - R-Panel Control Panel"
-    echo "  • 3306 - MySQL (optional, for remote access)"
     echo ""
     echo "=============================================="
     echo ""
@@ -1540,7 +1648,9 @@ main() {
     # Configuration steps
     configure_firewall
     configure_fail2ban
+    create_rpanel_user
     create_rpanel_structure
+    configure_rpanel_permissions
     create_nginx_config
     optimize_php_fpm
     create_swap
