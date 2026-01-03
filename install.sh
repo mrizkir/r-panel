@@ -188,7 +188,11 @@ $nrconf{restart} = 'a';
 EOF
     
     # Configure debconf for non-interactive mode
-    echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections >> "$LOG_FILE" 2>&1
+    if command -v debconf-set-selections &> /dev/null; then
+        echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections >> "$LOG_FILE" 2>&1
+    else
+        log_warning "debconf-set-selections not found, skipping debconf configuration"
+    fi
     
     if [ "$VERBOSE_MODE" = true ]; then
         log_success "Non-interactive mode configured"
@@ -200,7 +204,9 @@ EOF
 # Update system
 update_system() {
     # Configure apt to not ask questions
-    echo 'libc6 libraries/restart-without-asking boolean true' | debconf-set-selections >> "$LOG_FILE" 2>&1
+    if command -v debconf-set-selections &> /dev/null; then
+        echo 'libc6 libraries/restart-without-asking boolean true' | debconf-set-selections >> "$LOG_FILE" 2>&1
+    fi
     
     execute "Updating system packages" apt-get update -y
     execute "Upgrading system packages" apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
@@ -956,6 +962,15 @@ main() {
     if [ "$VERBOSE_MODE" = false ]; then
         show_progress "Initializing installation..."
         sleep 0.5
+    fi
+    
+    # Install debconf-utils first (needed by disable_prompts)
+    if ! command -v debconf-set-selections &> /dev/null; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Installing debconf-utils (required for non-interactive mode)..."
+        fi
+        apt-get update -qq >> "$LOG_FILE" 2>&1
+        apt-get install -y -qq debconf-utils >> "$LOG_FILE" 2>&1
     fi
     
     disable_prompts
