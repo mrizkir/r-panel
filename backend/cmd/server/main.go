@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -19,9 +20,110 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
+// findConfigFile searches for config.yaml in multiple locations
+func findConfigFile() string {
+	// List of possible config file locations (in order of priority)
+	possiblePaths := []string{
+		// 1. Current working directory
+		"./configs/config.yaml",
+		// 2. Installed location (production)
+		"/usr/local/r-panel/configs/config.yaml",
+		// 3. Relative to binary location
+		"",
+		// 4. Home directory fallback
+		"",
+	}
+	
+	// Try to find binary location and add relative path
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		possiblePaths = append(possiblePaths, filepath.Join(exeDir, "configs", "config.yaml"))
+		// Also try parent directory (if binary is in bin/)
+		possiblePaths = append(possiblePaths, filepath.Join(filepath.Dir(exeDir), "configs", "config.yaml"))
+	}
+	
+	// Try each path
+	for _, path := range possiblePaths {
+		if path == "" {
+			continue
+		}
+		// Try absolute path first
+		absPath, err := filepath.Abs(path)
+		if err == nil {
+			if _, err := os.Stat(absPath); err == nil {
+				return absPath
+			}
+		}
+		// Try relative path
+		if _, err := os.Stat(path); err == nil {
+			absPath, _ := filepath.Abs(path)
+			return absPath
+		}
+	}
+	
+	return ""
+}
+
+// findFrontendDir searches for web/dist directory in multiple locations
+func findFrontendDir() string {
+	// List of possible frontend directory locations (in order of priority)
+	possiblePaths := []string{
+		// 1. Current working directory
+		"./web/dist",
+		// 2. Installed location (production)
+		"/usr/local/r-panel/web/dist",
+		// 3. Relative to binary location
+		"",
+	}
+	
+	// Try to find binary location and add relative path
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		possiblePaths = append(possiblePaths, filepath.Join(exeDir, "web", "dist"))
+		// Also try parent directory (if binary is in bin/)
+		possiblePaths = append(possiblePaths, filepath.Join(filepath.Dir(exeDir), "web", "dist"))
+	}
+	
+	// Try each path
+	for _, path := range possiblePaths {
+		if path == "" {
+			continue
+		}
+		// Try absolute path first
+		absPath, err := filepath.Abs(path)
+		if err == nil {
+			if info, err := os.Stat(absPath); err == nil && info.IsDir() {
+				return absPath
+			}
+		}
+		// Try relative path
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			absPath, _ := filepath.Abs(path)
+			return absPath
+		}
+	}
+	
+	return ""
+}
+
 func main() {
+	// Find config file - try multiple locations
+	configPath := findConfigFile()
+	if configPath == "" {
+		log.Fatalf("Failed to find config file. Searched in:")
+		log.Fatalf("  - ./configs/config.yaml (current directory)")
+		log.Fatalf("  - /usr/local/r-panel/configs/config.yaml (installed location)")
+		log.Fatalf("  - configs/config.yaml (relative to binary)")
+		log.Fatalf("")
+		log.Fatalf("To fix this:")
+		log.Fatalf("  1. Copy example config: cp /usr/local/r-panel/configs/config.example.yaml /usr/local/r-panel/configs/config.yaml")
+		log.Fatalf("  2. Edit config: nano /usr/local/r-panel/configs/config.yaml")
+	}
+	
+	log.Printf("Loading config from: %s", configPath)
+	
 	// Load configuration
-	cfg, err := config.Load("configs/config.yaml")
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
@@ -48,57 +150,33 @@ func main() {
 	// Setup routes
 	routes.SetupRoutes(r, cfg)
 
-	// Serve static files from web/dist directory
-	frontendDir := filepath.Join("web", "dist")
+	// Find frontend directory - try multiple locations
+	frontendDir := findFrontendDir()
+	if frontendDir == "" {
+		log.Fatalf("Failed to find frontend directory (web/dist). Searched in:")
+		log.Fatalf("  - ./web/dist (current directory)")
+		log.Fatalf("  - /usr/local/r-panel/web/dist (installed location)")
+	}
+
 	r.Static("/assets", filepath.Join(frontendDir, "assets"))
 	r.StaticFile("/favicon.ico", filepath.Join(frontendDir, "favicon.ico"))
 
 	// Serve index.html for root and all non-API routes (SPA routing)
 	r.GET("/", func(c *gin.Context) {
-		// Check if this is R-Panel domain or client domain
-		host := strings.Split(c.Request.Host, ":")[0] // Remove port
-
-		// If TLS enabled and domain matches R-Panel domain, serve R-Panel
-		if cfg.Server.TLS.Enabled && cfg.Server.TLS.Domain != "" {
-			if host == cfg.Server.TLS.Domain {
-				c.File(filepath.Join(frontendDir, "index.html"))
-				return
-			}
-			// For client domains, you might want to proxy or serve client website
-			// For now, serve R-Panel as default
-		}
-
-		// Default: serve R-Panel
 		c.File(filepath.Join(frontendDir, "index.html"))
 	})
 
 	// Fallback to index.html for SPA routing (Vue Router)
 	r.NoRoute(func(c *gin.Context) {
 		path := c.Request.URL.Path
-		host := strings.Split(c.Request.Host, ":")[0] // Remove port
 
 		// Check if it's an API route
 		if len(path) >= 4 && path[:4] == "/api" {
-			// API routes - only for R-Panel domain (if TLS enabled)
-			if cfg.Server.TLS.Enabled && cfg.Server.TLS.Domain != "" {
-				if host != cfg.Server.TLS.Domain {
-					c.JSON(403, gin.H{"error": "API access denied"})
-					return
-				}
-			}
 			c.JSON(404, gin.H{"error": "API endpoint not found"})
 			return
 		}
 
-		// For R-Panel domain, serve index.html (SPA fallback)
-		if cfg.Server.TLS.Enabled && cfg.Server.TLS.Domain != "" {
-			if host == cfg.Server.TLS.Domain {
-				c.File(filepath.Join(frontendDir, "index.html"))
-				return
-			}
-		}
-
-		// Default: serve R-Panel (when TLS disabled or same domain)
+		// Serve index.html for SPA fallback
 		c.File(filepath.Join(frontendDir, "index.html"))
 	})
 
@@ -116,6 +194,17 @@ func main() {
 		cacheDir := cfg.Server.TLS.CacheDir
 		if cacheDir == "" {
 			cacheDir = "./data/certs"
+		}
+
+		// Convert to absolute path
+		absCacheDir, err := filepath.Abs(cacheDir)
+		if err == nil {
+			cacheDir = absCacheDir
+		}
+
+		// Ensure directory exists
+		if err := os.MkdirAll(cacheDir, 0755); err != nil {
+			log.Fatalf("Failed to create cache directory: %v", err)
 		}
 
 		// Create autocert manager with dynamic host policy
@@ -178,10 +267,10 @@ func main() {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	} else {
-		// Start HTTP server without TLS
+		// No TLS - listen on configured host/port (typically localhost for reverse proxy)
 		addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 		srv.Addr = addr
-		log.Printf("Starting R-Panel server on %s", addr)
+		log.Printf("Starting R-Panel server on %s (behind reverse proxy)", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}

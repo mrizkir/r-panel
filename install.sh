@@ -673,6 +673,23 @@ install_nginx() {
     fi
 }
 
+# Install Certbot for SSL certificates
+install_certbot() {
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Installing Certbot for SSL certificates..."
+    fi
+    
+    execute "Installing Certbot" apt-get install -y certbot python3-certbot-nginx
+    
+    # Enable certbot auto-renewal timer
+    systemctl enable certbot.timer >> "$LOG_FILE" 2>&1 || true
+    systemctl start certbot.timer >> "$LOG_FILE" 2>&1 || true
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Certbot installed successfully"
+    fi
+}
+
 # Install PHP and PHP-FPM
 install_php() {
     # PHP version to install
@@ -1093,6 +1110,191 @@ EOF
     fi
 }
 
+# Create Nginx configuration for R-Panel reverse proxy
+create_rpanel_nginx_config() {
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Creating Nginx configuration for R-Panel reverse proxy..."
+    fi
+    
+    # Get R-Panel domain from config or use server name
+    local R_PANEL_DOMAIN="${SERVER_NAME:-panel.example.com}"
+    
+    # Create Nginx config for R-Panel
+    # Note: SSL lines are commented by default. Uncomment after running certbot.
+    cat > /etc/nginx/sites-available/r-panel <<EOF
+# HTTP server (temporary - will redirect to HTTPS after SSL setup)
+server {
+    listen 8080;
+    listen [::]:8080;
+    server_name ${R_PANEL_DOMAIN};
+
+    # Temporarily serve HTTP (uncomment redirect after SSL setup)
+    # return 301 https://\$server_name\$request_uri;
+
+    # Logging
+    access_log /var/log/nginx/r-panel-access.log;
+    error_log /var/log/nginx/r-panel-error.log;
+
+    # Increase body size for file uploads
+    client_max_body_size 100M;
+    client_body_buffer_size 128k;
+
+    # Proxy to backend Go application
+    location / {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        
+        # Essential headers
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        
+        # WebSocket support (if needed in future)
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+        
+        # Buffering
+        proxy_buffering off;
+        proxy_request_buffering off;
+        
+        # Don't pass these headers
+        proxy_set_header Accept-Encoding "";
+    }
+
+    # Health check endpoint (optional)
+    location /health {
+        access_log off;
+        proxy_pass http://127.0.0.1:8081/health;
+        proxy_set_header Host \$host;
+    }
+
+    # Static files caching (if served directly)
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)$ {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host \$host;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+}
+
+# HTTPS server (uncomment after running certbot)
+# After running: certbot --nginx -d ${R_PANEL_DOMAIN}
+# Certbot will automatically uncomment and configure this section
+#server {
+#    listen 8080 ssl http2;
+#    listen [::]:8080 ssl http2;
+#    server_name ${R_PANEL_DOMAIN};
+#
+#    # SSL Certificate paths (setup by certbot)
+#    ssl_certificate /etc/letsencrypt/live/${R_PANEL_DOMAIN}/fullchain.pem;
+#    ssl_certificate_key /etc/letsencrypt/live/${R_PANEL_DOMAIN}/privkey.pem;
+#
+#    # SSL Configuration (modern, secure)
+#    ssl_protocols TLSv1.2 TLSv1.3;
+#    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
+#    ssl_prefer_server_ciphers off;
+#    ssl_session_cache shared:SSL:10m;
+#    ssl_session_timeout 10m;
+#    ssl_session_tickets off;
+#
+#    # Security headers
+#    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+#    add_header X-Frame-Options "SAMEORIGIN" always;
+#    add_header X-Content-Type-Options "nosniff" always;
+#    add_header X-XSS-Protection "1; mode=block" always;
+#    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+#
+#    # Logging
+#    access_log /var/log/nginx/r-panel-access.log;
+#    error_log /var/log/nginx/r-panel-error.log;
+#
+#    # Increase body size for file uploads
+#    client_max_body_size 100M;
+#    client_body_buffer_size 128k;
+#
+#    # Proxy to backend Go application
+#    location / {
+#        proxy_pass http://127.0.0.1:8081;
+#        proxy_http_version 1.1;
+#        
+#        # Essential headers
+#        proxy_set_header Host \$host;
+#        proxy_set_header X-Real-IP \$remote_addr;
+#        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+#        proxy_set_header X-Forwarded-Proto \$scheme;
+#        proxy_set_header X-Forwarded-Host \$host;
+#        proxy_set_header X-Forwarded-Port \$server_port;
+#        
+#        # WebSocket support (if needed in future)
+#        proxy_set_header Upgrade \$http_upgrade;
+#        proxy_set_header Connection "upgrade";
+#        
+#        # Timeouts
+#        proxy_connect_timeout 60s;
+#        proxy_send_timeout 60s;
+#        proxy_read_timeout 60s;
+#        
+#        # Buffering
+#        proxy_buffering off;
+#        proxy_request_buffering off;
+#        
+#        # Don't pass these headers
+#        proxy_set_header Accept-Encoding "";
+#    }
+#
+#    # Health check endpoint (optional)
+#    location /health {
+#        access_log off;
+#        proxy_pass http://127.0.0.1:8081/health;
+#        proxy_set_header Host \$host;
+#    }
+#
+#    # Static files caching (if served directly)
+#    location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)$ {
+#        proxy_pass http://127.0.0.1:8081;
+#        proxy_set_header Host \$host;
+#        expires 30d;
+#        add_header Cache-Control "public, immutable";
+#    }
+#}
+EOF
+
+EOF
+
+    # Enable the site
+    set +e
+    ln -sf /etc/nginx/sites-available/r-panel /etc/nginx/sites-enabled/r-panel 2>> "$LOG_FILE" || true
+    set -e
+    
+    # Test Nginx config (may fail if SSL cert not ready yet)
+    set +e
+    nginx -t >> "$LOG_FILE" 2>&1
+    local nginx_test_result=$?
+    set -e
+    
+    if [ $nginx_test_result -eq 0 ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "Nginx configuration for R-Panel created"
+        fi
+        # Reload Nginx
+        systemctl reload nginx >> "$LOG_FILE" 2>&1 || true
+    else
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_warning "Nginx configuration created but test failed"
+            log_info "This is normal if SSL certificate is not setup yet"
+            log_info "Setup SSL certificate with: certbot --nginx -d ${R_PANEL_DOMAIN}"
+        fi
+    fi
+}
+
 # Optimize PHP-FPM configuration
 optimize_php_fpm() {
     if [ "$VERBOSE_MODE" = true ]; then
@@ -1498,7 +1700,7 @@ compile_and_install_rpanel() {
     cat > /etc/systemd/system/r-panel.service <<EOF
 [Unit]
 Description=R-Panel Hosting Control Panel (Go)
-After=network.target mysql.service redis.service
+After=network.target mysql.service redis.service nginx.service
 Requires=mysql.service
 
 [Service]
@@ -1506,7 +1708,7 @@ Type=simple
 User=rpanel
 Group=rpanel
 WorkingDirectory=/usr/local/r-panel
-Environment="PORT=8080"
+Environment="PORT=8081"
 Environment="GIN_MODE=release"
 ExecStart=/usr/local/r-panel/r-panel
 Restart=always
@@ -1631,18 +1833,25 @@ display_info() {
     if [ -d /usr/local/r-panel ]; then
         echo "  1. Configure R-Panel:"
         echo "     - Edit: nano /usr/local/r-panel/configs/config.yaml"
+        echo "     - Set host: 127.0.0.1, port: 8081 (internal port)"
         echo "     - If config.yaml doesn't exist, copy from example:"
         echo "       cp /usr/local/r-panel/configs/config.example.yaml /usr/local/r-panel/configs/config.yaml"
-        echo "  2. Run: mysql_secure_installation"
-        echo "  3. Create database for R-Panel:"
+        echo "  2. Setup SSL certificate for R-Panel (after DNS is configured):"
+        if [ -n "$SERVER_NAME" ] && [ "$SERVER_NAME" != "default" ]; then
+            echo "     certbot --nginx -d ${SERVER_NAME} --email your-email@example.com"
+        else
+            echo "     certbot --nginx -d panel.example.com --email your-email@example.com"
+        fi
+        echo "     Note: If certbot fails, temporarily comment SSL lines in:"
+        echo "     /etc/nginx/sites-available/r-panel"
+        echo "  3. Run: mysql_secure_installation"
+        echo "  4. Create database for R-Panel:"
         echo "     mysql -e \"CREATE DATABASE rpanel;\""
         echo "     mysql -e \"CREATE USER 'rpanel'@'localhost' IDENTIFIED BY 'your_password';\""
         echo "     mysql -e \"GRANT ALL ON rpanel.* TO 'rpanel'@'localhost';\""
-        echo "  4. Update database config in R-Panel configuration file"
-        echo "  5. Restart R-Panel: systemctl restart r-panel"
-        echo "  6. Set up SSL certificate for port 8080 (optional):"
-        echo "     - Configure SSL directly in R-Panel settings"
-        echo "     - Or use a reverse proxy (nginx/apache) for SSL termination"
+        echo "  5. Update database config in R-Panel configuration file"
+        echo "  6. Restart services:"
+        echo "     systemctl restart r-panel nginx"
     else
         echo "  1. Run: mysql_secure_installation"
         echo "  2. Clone R-Panel: git clone https://github.com/mrizkir/r-panel"
@@ -1750,6 +1959,7 @@ main() {
     update_system
     install_utilities
     install_nginx
+    install_certbot
     install_php
     install_mariadb
     install_redis
@@ -1764,6 +1974,7 @@ main() {
     create_rpanel_structure
     configure_rpanel_permissions
     create_nginx_config
+    create_rpanel_nginx_config
     optimize_php_fpm
     create_swap
     

@@ -3,14 +3,15 @@
 
 # Server settings
 server:
-  host: "0.0.0.0"
-  port: 8080
-  mode: "debug" # debug, release
+  host: "127.0.0.1"  # Listen on localhost (behind Nginx reverse proxy)
+  port: 8081         # Internal port (Nginx proxies to this)
+  mode: "release"   # debug, release
+  # TLS disabled when using Nginx reverse proxy (Nginx handles SSL)
   tls:
-    enabled: false  # Set to true to enable Let's Encrypt TLS
+    enabled: false   # Set to true only if NOT using Nginx reverse proxy
     domain: "panel.example.com"  # Domain utama R-Panel
     email: "admin@example.com"  # Email untuk Let's Encrypt
-    cache_dir: "./data/certs"  # Cache directory untuk certificates (auto-created)
+    cache_dir: "/usr/local/r-panel/data/certs"  # Cache directory untuk certificates (absolute path)
 
 # Database configuration
 database:
