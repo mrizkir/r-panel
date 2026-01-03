@@ -1187,6 +1187,43 @@ EOF
     fi
 }
 
+# Create temporary self-signed SSL certificate for R-Panel
+create_temp_ssl_certificate() {
+    local R_PANEL_DOMAIN="${SERVER_NAME:-panel.example.com}"
+    local CERT_DIR="/etc/letsencrypt/live/${R_PANEL_DOMAIN}"
+    
+    # Create directory structure
+    mkdir -p "$CERT_DIR" >> "$LOG_FILE" 2>&1
+    
+    # Check if certificate already exists
+    if [ -f "${CERT_DIR}/fullchain.pem" ] && [ -f "${CERT_DIR}/privkey.pem" ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "SSL certificate already exists at ${CERT_DIR}"
+        fi
+        return 0
+    fi
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Creating temporary self-signed SSL certificate for ${R_PANEL_DOMAIN}..."
+    fi
+    
+    # Generate self-signed certificate valid for 365 days
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout "${CERT_DIR}/privkey.pem" \
+        -out "${CERT_DIR}/fullchain.pem" \
+        -subj "/C=US/ST=State/L=City/O=Organization/CN=${R_PANEL_DOMAIN}" \
+        >> "$LOG_FILE" 2>&1
+    
+    # Set proper permissions
+    chmod 600 "${CERT_DIR}/privkey.pem" >> "$LOG_FILE" 2>&1
+    chmod 644 "${CERT_DIR}/fullchain.pem" >> "$LOG_FILE" 2>&1
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Temporary self-signed SSL certificate created"
+        log_info "Note: Replace with Let's Encrypt certificate using: certbot --nginx -d ${R_PANEL_DOMAIN}"
+    fi
+}
+
 # Create Nginx configuration for R-Panel reverse proxy
 create_rpanel_nginx_config() {
     if [ "$VERBOSE_MODE" = true ]; then
@@ -1196,17 +1233,50 @@ create_rpanel_nginx_config() {
     # Get R-Panel domain from config or use server name
     local R_PANEL_DOMAIN="${SERVER_NAME:-panel.example.com}"
     
+    # Create temporary self-signed certificate first (so nginx can start with SSL)
+    # This will be replaced by Let's Encrypt certificate if available
+    create_temp_ssl_certificate
+    
     # Create Nginx config for R-Panel
-    # Note: SSL lines are commented by default. Uncomment after running certbot.
+    # SSL support is enabled by default - certificate will be setup by certbot
     cat > /etc/nginx/sites-available/r-panel <<EOF
-# HTTP server (temporary - will redirect to HTTPS after SSL setup)
+# HTTP server - redirect to HTTPS
 server {
     listen 8080;
     listen [::]:8080;
-    server_name ${R_PANEL_DOMAIN};
+    server_name _;  # Catch-all for all domains
 
-    # Temporarily serve HTTP (uncomment redirect after SSL setup)
-    # return 301 https://\$server_name\$request_uri;
+    # Redirect all HTTP traffic to HTTPS
+    return 301 https://\$host\$request_uri;
+}
+
+# HTTPS server - SSL enabled by default
+# Supports multiple domains via SNI (Server Name Indication)
+server {
+    listen 8080 ssl http2;
+    listen [::]:8080 ssl http2;
+    server_name _;  # Catch-all for all domains (SNI will handle domain-specific certificates)
+
+    # SSL Certificate paths
+    # Default: self-signed certificate (created during installation)
+    # Will be updated by certbot when Let's Encrypt certificate is obtained
+    ssl_certificate /etc/letsencrypt/live/${R_PANEL_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${R_PANEL_DOMAIN}/privkey.pem;
+
+    # SSL Configuration (modern, secure)
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    ssl_session_tickets off;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
     # Logging
     access_log /var/log/nginx/r-panel-access.log;
@@ -1261,87 +1331,6 @@ server {
         add_header Cache-Control "public, immutable";
     }
 }
-
-# HTTPS server (uncomment after running certbot)
-# After running: certbot --nginx -d ${R_PANEL_DOMAIN}
-# Certbot will automatically uncomment and configure this section
-#server {
-#    listen 8080 ssl http2;
-#    listen [::]:8080 ssl http2;
-#    server_name ${R_PANEL_DOMAIN};
-#
-#    # SSL Certificate paths (setup by certbot)
-#    ssl_certificate /etc/letsencrypt/live/${R_PANEL_DOMAIN}/fullchain.pem;
-#    ssl_certificate_key /etc/letsencrypt/live/${R_PANEL_DOMAIN}/privkey.pem;
-#
-#    # SSL Configuration (modern, secure)
-#    ssl_protocols TLSv1.2 TLSv1.3;
-#    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
-#    ssl_prefer_server_ciphers off;
-#    ssl_session_cache shared:SSL:10m;
-#    ssl_session_timeout 10m;
-#    ssl_session_tickets off;
-#
-#    # Security headers
-#    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-#    add_header X-Frame-Options "SAMEORIGIN" always;
-#    add_header X-Content-Type-Options "nosniff" always;
-#    add_header X-XSS-Protection "1; mode=block" always;
-#    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-#
-#    # Logging
-#    access_log /var/log/nginx/r-panel-access.log;
-#    error_log /var/log/nginx/r-panel-error.log;
-#
-#    # Increase body size for file uploads
-#    client_max_body_size 100M;
-#    client_body_buffer_size 128k;
-#
-#    # Proxy to backend Go application
-#    location / {
-#        proxy_pass http://127.0.0.1:8081;
-#        proxy_http_version 1.1;
-#        
-#        # Essential headers
-#        proxy_set_header Host \$host;
-#        proxy_set_header X-Real-IP \$remote_addr;
-#        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-#        proxy_set_header X-Forwarded-Proto \$scheme;
-#        proxy_set_header X-Forwarded-Host \$host;
-#        proxy_set_header X-Forwarded-Port \$server_port;
-#        
-#        # WebSocket support (if needed in future)
-#        proxy_set_header Upgrade \$http_upgrade;
-#        proxy_set_header Connection "upgrade";
-#        
-#        # Timeouts
-#        proxy_connect_timeout 60s;
-#        proxy_send_timeout 60s;
-#        proxy_read_timeout 60s;
-#        
-#        # Buffering
-#        proxy_buffering off;
-#        proxy_request_buffering off;
-#        
-#        # Don't pass these headers
-#        proxy_set_header Accept-Encoding "";
-#    }
-#
-#    # Health check endpoint (optional)
-#    location /health {
-#        access_log off;
-#        proxy_pass http://127.0.0.1:8081/health;
-#        proxy_set_header Host \$host;
-#    }
-#
-#    # Static files caching (if served directly)
-#    location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)$ {
-#        proxy_pass http://127.0.0.1:8081;
-#        proxy_set_header Host \$host;
-#        expires 30d;
-#        add_header Cache-Control "public, immutable";
-#    }
-#}
 EOF
 
     # Enable the site
@@ -1379,31 +1368,39 @@ setup_ssl_certificate() {
     # Get R-Panel domain from config or use server name
     local R_PANEL_DOMAIN="${SERVER_NAME:-panel.example.com}"
     
-    # Skip if server name is not set or is default
+    # Create temporary self-signed certificate first (so nginx can start)
+    create_temp_ssl_certificate
+    
+    # Skip Let's Encrypt setup if server name is not set or is default
     if [ -z "$SERVER_NAME" ] || [ "$SERVER_NAME" = "default" ]; then
         if [ "$VERBOSE_MODE" = true ]; then
-            log_warning "Skipping SSL setup: Server name not configured or is 'default'"
-            log_info "To setup SSL later, run: certbot --nginx -d your-domain.com"
+            log_warning "Skipping Let's Encrypt SSL setup: Server name not configured or is 'default'"
+            log_info "Using self-signed certificate. To setup Let's Encrypt later, run: certbot --nginx -d your-domain.com"
         fi
         return 0
     fi
     
     # Check if certbot is installed
     if ! command -v certbot &> /dev/null; then
-        log_warning "Certbot not found. SSL setup skipped."
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_warning "Certbot not found. Using self-signed certificate."
+            log_info "Install certbot and run: certbot --nginx -d ${R_PANEL_DOMAIN}"
+        fi
         return 0
     fi
     
     # Check if domain resolves (basic DNS check)
     if ! host "$R_PANEL_DOMAIN" &> /dev/null; then
-        log_warning "Domain $R_PANEL_DOMAIN does not resolve. SSL setup skipped."
-        log_info "Please configure DNS first, then run: certbot --nginx -d $R_PANEL_DOMAIN"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_warning "Domain $R_PANEL_DOMAIN does not resolve. Using self-signed certificate."
+            log_info "Please configure DNS first, then run: certbot --nginx -d $R_PANEL_DOMAIN"
+        fi
         return 0
     fi
     
-    # Try to setup SSL certificate (non-blocking)
+    # Try to setup Let's Encrypt SSL certificate (non-blocking)
     if [ "$VERBOSE_MODE" = true ]; then
-        log_info "Attempting to setup SSL certificate for $R_PANEL_DOMAIN..."
+        log_info "Attempting to setup Let's Encrypt SSL certificate for $R_PANEL_DOMAIN..."
         log_info "This may require email input. Use SSL_EMAIL environment variable to set email."
     fi
     
@@ -1413,13 +1410,15 @@ setup_ssl_certificate() {
     # Determine email for certbot
     local CERTBOT_EMAIL="${SSL_EMAIL:-admin@${R_PANEL_DOMAIN}}"
     
-    # Run certbot in non-interactive mode (will prompt for email if not provided)
-    # Use --agree-tos and --redirect for automatic setup
-    certbot --nginx -d "$R_PANEL_DOMAIN" \
+    # Run certbot in non-interactive mode for port 8080
+    # Note: certbot --nginx may not work directly for port 8080
+    # We'll use certbot certonly with standalone mode or manual configuration
+    certbot certonly --nginx \
+        -d "$R_PANEL_DOMAIN" \
         --non-interactive \
         --agree-tos \
-        --redirect \
         --email "$CERTBOT_EMAIL" \
+        --nginx-server-root /etc/nginx \
         >> "$LOG_FILE" 2>&1
     
     local certbot_result=$?
@@ -1427,21 +1426,27 @@ setup_ssl_certificate() {
     trap 'error_exit $LINENO' ERR
     
     if [ $certbot_result -eq 0 ]; then
-        # Reload nginx after SSL setup
-        systemctl reload nginx >> "$LOG_FILE" 2>&1 || true
-        
-        if [ "$VERBOSE_MODE" = true ]; then
-            log_success "SSL certificate setup successfully for $R_PANEL_DOMAIN"
+        # Update nginx config with Let's Encrypt certificate paths
+        # Certbot should have already updated the config, but we verify
+        if [ -f "/etc/letsencrypt/live/${R_PANEL_DOMAIN}/fullchain.pem" ]; then
+            # Reload nginx after SSL setup
+            systemctl reload nginx >> "$LOG_FILE" 2>&1 || true
+            
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_success "Let's Encrypt SSL certificate setup successfully for $R_PANEL_DOMAIN"
+            fi
         fi
     else
-        log_warning "SSL certificate setup failed for $R_PANEL_DOMAIN"
-        log_info "This is normal if:"
-        log_info "  - DNS is not configured yet"
-        log_info "  - Domain does not point to this server"
-        log_info "  - Port 80 is not accessible from internet"
-        log_info ""
-        log_info "To setup SSL manually later, run:"
-        log_info "  certbot --nginx -d $R_PANEL_DOMAIN"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_warning "Let's Encrypt SSL certificate setup failed for $R_PANEL_DOMAIN"
+            log_info "Using self-signed certificate. This is normal if:"
+            log_info "  - DNS is not configured yet"
+            log_info "  - Domain does not point to this server"
+            log_info "  - Port 80 is not accessible from internet"
+            log_info ""
+            log_info "To setup Let's Encrypt manually later, run:"
+            log_info "  certbot --nginx -d $R_PANEL_DOMAIN"
+        fi
     fi
 }
 
@@ -1932,10 +1937,10 @@ compile_and_install_rpanel() {
         fi
         
         # Determine API URL based on SERVER_NAME
-        local API_URL="http://localhost:8081/api"
+        local API_URL="http://localhost:8080/api"
         if [ -n "$SERVER_NAME" ] && [ "$SERVER_NAME" != "default" ]; then
             # Use HTTPS for production (SSL will be setup during installation or after)
-            API_URL="https://${SERVER_NAME}:8081/api"
+            API_URL="https://${SERVER_NAME}:8080/api"
         fi
         
         # Copy .env.local.example to .env.local if it exists
