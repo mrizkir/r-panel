@@ -146,6 +146,16 @@ curl -fsSL https://raw.githubusercontent.com/rizkiromdoni/r-panel/main/install.s
 # Default: admin / changeme
 ```
 
+### Debug Installation (Troubleshooting)
+If you encounter issues during installation, run with debug mode to see detailed output:
+```bash
+bash -x ./install.sh --verbose 2>&1 | tee debug.log
+```
+This will:
+- Show all commands being executed (`-x` flag)
+- Display verbose output (`--verbose`)
+- Save all output to `debug.log` file for later review
+
 ### Manual Installation
 ```bash
 # 1. Install Go

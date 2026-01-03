@@ -426,6 +426,93 @@ prompt_server_ip() {
     echo ""
 }
 
+# Configure hostname and /etc/hosts
+configure_hostname() {
+    if [ -z "$SERVER_NAME" ] || [ "$SERVER_NAME" = "default" ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Skipping hostname configuration (no valid server name provided)"
+        fi
+        return 0
+    fi
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Configuring hostname and /etc/hosts..."
+    fi
+    
+    # Get current hostname
+    local CURRENT_HOSTNAME=$(hostname)
+    local CURRENT_FQDN=$(hostname -f 2>/dev/null || hostname)
+    
+    # Only configure if server name is different from current hostname
+    if [ "$SERVER_NAME" != "$CURRENT_HOSTNAME" ] && [ "$SERVER_NAME" != "$CURRENT_FQDN" ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Setting hostname to: $SERVER_NAME"
+        fi
+        
+        # Set hostname using hostnamectl
+        set +e
+        hostnamectl set-hostname "$SERVER_NAME" >> "$LOG_FILE" 2>&1
+        local hostname_result=$?
+        set -e
+        
+        if [ $hostname_result -eq 0 ]; then
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_success "Hostname set to: $SERVER_NAME"
+            fi
+        else
+            log_warning "Failed to set hostname using hostnamectl. Continuing..."
+        fi
+    else
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Hostname already set to: $SERVER_NAME"
+        fi
+    fi
+    
+    # Update /etc/hosts if IP and server name are provided
+    if [ -n "$SERVER_IP" ] && [ -n "$SERVER_NAME" ] && [ "$SERVER_IP" != "127.0.0.1" ] && [ "$SERVER_NAME" != "default" ]; then
+        # Check if entry already exists in /etc/hosts
+        if ! grep -qE "^[[:space:]]*${SERVER_IP}[[:space:]]+.*${SERVER_NAME}" /etc/hosts 2>/dev/null; then
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Adding $SERVER_IP $SERVER_NAME to /etc/hosts"
+            fi
+            
+            # Backup /etc/hosts
+            cp /etc/hosts /etc/hosts.backup.$(date +%Y%m%d_%H%M%S) >> "$LOG_FILE" 2>&1 || true
+            
+            # Remove old entry if exists (to avoid duplicates)
+            sed -i "/[[:space:]]*${SERVER_NAME}[[:space:]]*$/d" /etc/hosts 2>> "$LOG_FILE" || true
+            
+            # Add new entry
+            set +e
+            echo "$SERVER_IP    $SERVER_NAME" >> /etc/hosts 2>> "$LOG_FILE"
+            local hosts_result=$?
+            set -e
+            
+            if [ $hosts_result -eq 0 ]; then
+                if [ "$VERBOSE_MODE" = true ]; then
+                    log_success "Updated /etc/hosts with $SERVER_IP -> $SERVER_NAME"
+                fi
+            else
+                log_warning "Failed to update /etc/hosts. You may need to add it manually."
+            fi
+        else
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Entry for $SERVER_IP -> $SERVER_NAME already exists in /etc/hosts"
+            fi
+        fi
+    fi
+    
+    # Also ensure localhost entry exists
+    if ! grep -qE "^[[:space:]]*127\.0\.0\.1[[:space:]]+.*localhost" /etc/hosts 2>/dev/null; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Ensuring localhost entry exists in /etc/hosts"
+        fi
+        set +e
+        echo "127.0.0.1    localhost" >> /etc/hosts 2>> "$LOG_FILE" || true
+        set -e
+    fi
+}
+
 # Detect OS
 detect_os() {
     if [ -f /etc/os-release ]; then
@@ -1363,6 +1450,9 @@ main() {
     
     # Log server IP
     echo "Server IP: $SERVER_IP" >> "$LOG_FILE"
+    
+    # Configure hostname and /etc/hosts
+    configure_hostname
     
     # Show initial progress if in quiet mode
     if [ "$VERBOSE_MODE" = false ]; then
