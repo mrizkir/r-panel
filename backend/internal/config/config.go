@@ -18,9 +18,17 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
-	Mode string `yaml:"mode"`
+    Host string    `yaml:"host"`
+    Port int       `yaml:"port"`
+    Mode string    `yaml:"mode"`
+    TLS  TLSConfig `yaml:"tls,omitempty"`
+}
+
+type TLSConfig struct {
+    Enabled  bool   `yaml:"enabled"`
+    Domain   string `yaml:"domain"`   // Domain utama R-Panel
+    Email    string `yaml:"email"`    // Email untuk Let's Encrypt
+    CacheDir string `yaml:"cache_dir"` // Cache directory untuk certificates
 }
 
 type DatabaseConfig struct {
@@ -137,6 +145,17 @@ func Load(configPath string) (*Config, error) {
 	// Ensure backups directory exists
 	if err := os.MkdirAll(cfg.Paths.Backups, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create backups directory: %w", err)
+	}
+
+	// Ensure TLS cache directory exists if TLS is enabled
+	if cfg.Server.TLS.Enabled {
+		cacheDir := cfg.Server.TLS.CacheDir
+		if cacheDir == "" {
+			cacheDir = "./data/certs"
+		}
+		if err := os.MkdirAll(cacheDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create TLS cache directory: %w", err)
+		}
 	}
 
 	Global = &cfg

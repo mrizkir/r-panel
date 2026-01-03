@@ -6,6 +6,11 @@ server:
   host: "0.0.0.0"
   port: 8080
   mode: "debug" # debug, release
+  tls:
+    enabled: false  # Set to true to enable Let's Encrypt TLS
+    domain: "panel.example.com"  # Domain utama R-Panel
+    email: "admin@example.com"  # Email untuk Let's Encrypt
+    cache_dir: "./data/certs"  # Cache directory untuk certificates (auto-created)
 
 # Database configuration
 database:
