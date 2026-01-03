@@ -936,13 +936,12 @@ create_rpanel_structure() {
         log_info "Creating R-Panel directory structure..."
     fi
     
-    # Main directories
-    mkdir -p /opt/r-panel >> "$LOG_FILE" 2>&1
-    mkdir -p /opt/r-panel/bin >> "$LOG_FILE" 2>&1
-    mkdir -p /opt/r-panel/config >> "$LOG_FILE" 2>&1
-    mkdir -p /opt/r-panel/logs >> "$LOG_FILE" 2>&1
-    mkdir -p /opt/r-panel/temp >> "$LOG_FILE" 2>&1
-    mkdir -p /opt/r-panel/backups >> "$LOG_FILE" 2>&1
+    # Main directories (consolidated in /usr/local/r-panel)
+    mkdir -p /usr/local/r-panel/bin >> "$LOG_FILE" 2>&1
+    mkdir -p /usr/local/r-panel/config >> "$LOG_FILE" 2>&1
+    mkdir -p /usr/local/r-panel/logs >> "$LOG_FILE" 2>&1
+    mkdir -p /usr/local/r-panel/temp >> "$LOG_FILE" 2>&1
+    mkdir -p /usr/local/r-panel/backups >> "$LOG_FILE" 2>&1
     
     # Web directories
     mkdir -p /var/www/r-panel >> "$LOG_FILE" 2>&1
@@ -953,9 +952,9 @@ create_rpanel_structure() {
     mkdir -p /var/www/vhosts >> "$LOG_FILE" 2>&1
     
     # Set permissions
-    # /opt/r-panel owned by rpanel (for R-Panel application)
-    chown -R rpanel:rpanel /opt/r-panel >> "$LOG_FILE" 2>&1 || true
-    chmod -R 755 /opt/r-panel >> "$LOG_FILE" 2>&1 || true
+    # /usr/local/r-panel owned by rpanel (for R-Panel application)
+    chown -R rpanel:rpanel /usr/local/r-panel >> "$LOG_FILE" 2>&1 || true
+    chmod -R 755 /usr/local/r-panel >> "$LOG_FILE" 2>&1 || true
     
     # /var/www owned by www-data (for client websites)
     chown -R www-data:www-data /var/www >> "$LOG_FILE" 2>&1 || true
@@ -1501,18 +1500,18 @@ Environment="GIN_MODE=release"
 ExecStart=/usr/local/r-panel/r-panel
 Restart=always
 RestartSec=3
-StandardOutput=append:/opt/r-panel/logs/r-panel.log
-StandardError=append:/opt/r-panel/logs/r-panel-error.log
+StandardOutput=append:/usr/local/r-panel/logs/r-panel.log
+StandardError=append:/usr/local/r-panel/logs/r-panel-error.log
 
-# Security
+# Security (compatible with systems that have limited namespace support)
 NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
+# Removed PrivateTmp, ProtectSystem, and ProtectHome to avoid namespace errors
+# These can cause exit code 226/NAMESPACE on some systems
+# File permissions are still enforced via User/Group and ReadOnlyPaths/ReadWritePaths
 # Allow read access to system logs and configs
 ReadOnlyPaths=/var/log /etc/nginx/nginx.conf /etc/php
 # Allow write access to specific directories needed by R-Panel
-ReadWritePaths=/usr/local/r-panel/data /usr/local/r-panel/logs /usr/local/r-panel/uploads /opt/r-panel/logs /var/www/vhosts /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d /etc/php/*/fpm/pool.d
+ReadWritePaths=/usr/local/r-panel/data /usr/local/r-panel/logs /usr/local/r-panel/uploads /var/www/vhosts /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d /etc/php/*/fpm/pool.d
 
 [Install]
 WantedBy=multi-user.target
@@ -1588,13 +1587,9 @@ display_info() {
     
     echo ""
     echo "Directories Created:"
-    echo "  • /opt/r-panel (panel files)"
+    echo "  • /usr/local/r-panel (R-Panel application and files)"
     echo "  • /var/www/r-panel (web files)"
     echo "  • /var/www/vhosts (user websites)"
-    
-    if [ -d /usr/local/r-panel ]; then
-        echo "  • /usr/local/r-panel (R-Panel application)"
-    fi
     
     echo ""
     
@@ -1649,11 +1644,11 @@ display_info() {
     if [ -d /usr/local/r-panel ]; then
         echo "  • R-Panel status: systemctl status r-panel"
         echo "  • R-Panel logs: journalctl -u r-panel -f"
-        echo "  • Application logs: tail -f /opt/r-panel/logs/*.log"
+        echo "  • Application logs: tail -f /usr/local/r-panel/logs/*.log"
         echo "  • Restart R-Panel: systemctl restart r-panel"
     fi
     
-    echo "  • View logs: tail -f /opt/r-panel/logs/*.log"
+    echo "  • View logs: tail -f /usr/local/r-panel/logs/*.log"
     echo "  • Nginx test: nginx -t"
     
     if [ -d /usr/local/r-panel ]; then
