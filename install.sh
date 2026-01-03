@@ -105,29 +105,51 @@ execute() {
     local description="$1"
     shift
     
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "execute() called with: $description"
+    fi
+    
     ((CURRENT_STEP++))
     show_progress "$description"
     
     if [ "$VERBOSE_MODE" = true ]; then
         echo ""
         log_info "$description"
-        set +e  # Temporarily disable exit on error for this command
-        if "$@" 2>&1 | tee -a "$LOG_FILE"; then
-            local exit_code=0
-        else
-            local exit_code=${PIPESTATUS[0]}
+        # Temporarily disable exit on error and trap
+        set +e
+        trap - ERR  # Disable error trap temporarily
+        
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Executing command: $@"
         fi
-        set -e  # Re-enable exit on error
+        
+        # Execute command and capture exit code properly
+        "$@" 2>&1 | tee -a "$LOG_FILE"
+        local exit_code=${PIPESTATUS[0]}
+        
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Command exit code: $exit_code"
+        fi
+        
+        # Re-enable error handling
+        set -e
+        trap 'error_exit $LINENO' ERR
         
         if [ $exit_code -ne 0 ]; then
             log_error "Failed: $description (exit code: $exit_code)"
             return 1
         fi
     else
-        set +e  # Temporarily disable exit on error for this command
+        # Temporarily disable exit on error and trap
+        set +e
+        trap - ERR  # Disable error trap temporarily
+        
         "$@" >> "$LOG_FILE" 2>&1
         local exit_code=$?
-        set -e  # Re-enable exit on error
+        
+        # Re-enable error handling
+        set -e
+        trap 'error_exit $LINENO' ERR
         
         if [ $exit_code -ne 0 ]; then
             echo ""
@@ -235,6 +257,10 @@ EOF
 
 # Update system
 update_system() {
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Entering update_system() function"
+    fi
+    
     # Configure apt to not ask questions
     if command -v debconf-set-selections &> /dev/null; then
         set +e  # Temporarily disable exit on error
@@ -242,7 +268,15 @@ update_system() {
         set -e  # Re-enable exit on error
     fi
     
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "About to execute: apt-get update -y"
+    fi
+    
     execute "Updating system packages" apt-get update -y
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "apt-get update completed"
+    fi
     execute "Upgrading system packages" apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
     execute "Upgrading distribution packages" apt-get dist-upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
     
