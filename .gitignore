@@ -37,3 +37,6 @@ backend/configs/config.yaml
 # Air live reload
 tmp/
 errors.log
+
+# Frontend build output
+backend/web/dist/
