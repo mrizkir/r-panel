@@ -1926,6 +1926,51 @@ compile_and_install_rpanel() {
         
         log_success "Frontend dependencies installed successfully"
         
+        # Setup .env.local for production build
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Setting up frontend environment variables..."
+        fi
+        
+        # Determine API URL based on SERVER_NAME
+        local API_URL="http://localhost:8081/api"
+        if [ -n "$SERVER_NAME" ] && [ "$SERVER_NAME" != "default" ]; then
+            # Use HTTPS for production (SSL will be setup during installation or after)
+            API_URL="https://${SERVER_NAME}:8081/api"
+        fi
+        
+        # Copy .env.local.example to .env.local if it exists
+        if [ -f ".env.local.example" ]; then
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Copying .env.local.example to .env.local..."
+            fi
+            cp .env.local.example .env.local >> "$LOG_FILE" 2>&1
+        else
+            # Create .env.local if .env.local.example doesn't exist
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Creating .env.local file..."
+            fi
+            touch .env.local >> "$LOG_FILE" 2>&1
+        fi
+        
+        # Update or add VITE_API_URL in .env.local
+        if grep -q "^VITE_API_URL=" .env.local 2>/dev/null; then
+            # Update existing VITE_API_URL
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Updating VITE_API_URL in .env.local to: $API_URL"
+            fi
+            sed -i "s|^VITE_API_URL=.*|VITE_API_URL=$API_URL|" .env.local
+        else
+            # Add VITE_API_URL if it doesn't exist
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Adding VITE_API_URL to .env.local: $API_URL"
+            fi
+            echo "VITE_API_URL=$API_URL" >> .env.local
+        fi
+        
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "Frontend environment configured: VITE_API_URL=$API_URL"
+        fi
+        
         # Check if build script exists and build
         if grep -q '"build"' package.json; then
             log_info "Building frontend assets (output to backend/web/dist)..."
