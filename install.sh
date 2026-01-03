@@ -1204,34 +1204,78 @@ compile_and_install_rpanel() {
     
     # Build frontend assets if frontend directory exists
     if [ -d "frontend" ] && [ -f "frontend/package.json" ]; then
-        if [ "$VERBOSE_MODE" = true ]; then
-            log_info "Building frontend assets from frontend/ directory..."
-        fi
+        log_info "Building frontend assets from frontend/ directory..."
         
         cd frontend
         
         # Install frontend dependencies
-        if [ "$VERBOSE_MODE" = true ]; then
-            log_info "Installing frontend dependencies..."
-        fi
+        log_info "Installing frontend dependencies..."
+        
+        # Temporarily disable exit on error to check npm install result
+        set +e
+        trap - ERR
         npm install >> "$LOG_FILE" 2>&1
+        local npm_install_result=$?
+        set -e
+        trap 'error_exit $LINENO' ERR
+        
+        if [ $npm_install_result -ne 0 ]; then
+            log_error "Frontend npm install failed with exit code $npm_install_result"
+            log_error "Check log file for details: $LOG_FILE"
+            cd "$SOURCE_DIR"
+            exit 1
+        fi
+        
+        log_success "Frontend dependencies installed successfully"
         
         # Check if build script exists and build
         if grep -q '"build"' package.json; then
-            if [ "$VERBOSE_MODE" = true ]; then
-                log_info "Building frontend assets (output to backend/web/dist)..."
-            fi
-            npm run build >> "$LOG_FILE" 2>&1
+            log_info "Building frontend assets (output to backend/web/dist)..."
             
-            if [ "$VERBOSE_MODE" = true ]; then
-                if [ -d "../backend/web/dist" ]; then
-                    log_success "Frontend built successfully to backend/web/dist"
-                else
-                    log_warning "Frontend build completed but backend/web/dist not found"
-                fi
+            # Temporarily disable exit on error to check npm build result
+            set +e
+            trap - ERR
+            npm run build >> "$LOG_FILE" 2>&1
+            local npm_build_result=$?
+            set -e
+            trap 'error_exit $LINENO' ERR
+            
+            if [ $npm_build_result -ne 0 ]; then
+                log_error "Frontend build failed with exit code $npm_build_result"
+                log_error "Check log file for details: $LOG_FILE"
+                cd "$SOURCE_DIR"
+                exit 1
             fi
+            
+            # Verify build output exists and has files
+            if [ ! -d "../backend/web/dist" ]; then
+                log_error "Frontend build completed but backend/web/dist directory not found"
+                log_error "Expected build output at: $SOURCE_DIR/backend/web/dist"
+                cd "$SOURCE_DIR"
+                exit 1
+            fi
+            
+            # Check if index.html exists in dist directory
+            if [ ! -f "../backend/web/dist/index.html" ]; then
+                log_error "Frontend build completed but index.html not found in backend/web/dist"
+                log_error "Build may have failed silently"
+                cd "$SOURCE_DIR"
+                exit 1
+            fi
+            
+            # Count files in dist to verify build succeeded
+            local dist_file_count=$(find "../backend/web/dist" -type f | wc -l)
+            if [ "$dist_file_count" -eq 0 ]; then
+                log_error "Frontend build directory is empty"
+                cd "$SOURCE_DIR"
+                exit 1
+            fi
+            
+            log_success "Frontend built successfully to backend/web/dist ($dist_file_count files)"
         else
-            log_warning "No build script found in frontend/package.json"
+            log_error "No build script found in frontend/package.json"
+            cd "$SOURCE_DIR"
+            exit 1
         fi
         
         # Return to source directory
@@ -1338,7 +1382,7 @@ compile_and_install_rpanel() {
     set -e
     
     # Copy static files, templates, config, etc. (check both root and backend)
-    for dir in static templates public assets config web; do
+    for dir in static templates public assets config; do
         set +e
         if [ -d "$dir" ]; then
             cp -r "$dir" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1 || true
@@ -1347,6 +1391,43 @@ compile_and_install_rpanel() {
         fi
         set -e
     done
+    
+    # Copy web directory separately with verification (critical for frontend)
+    set +e
+    trap - ERR
+    if [ -d "backend/web" ]; then
+        cp -r "backend/web" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+        local web_copy_result=$?
+    elif [ -d "web" ]; then
+        cp -r "web" /usr/local/r-panel/ >> "$LOG_FILE" 2>&1
+        local web_copy_result=$?
+    else
+        log_error "web directory not found in source directory"
+        local web_copy_result=1
+    fi
+    set -e
+    trap 'error_exit $LINENO' ERR
+    
+    if [ $web_copy_result -ne 0 ]; then
+        log_error "Failed to copy web directory to /usr/local/r-panel/"
+        exit 1
+    fi
+    
+    # Verify web/dist exists after copy
+    if [ ! -d "/usr/local/r-panel/web/dist" ]; then
+        log_error "web/dist directory not found in /usr/local/r-panel after copy"
+        exit 1
+    fi
+    
+    # Verify index.html exists
+    if [ ! -f "/usr/local/r-panel/web/dist/index.html" ]; then
+        log_error "index.html not found in /usr/local/r-panel/web/dist"
+        log_error "Frontend build may not have completed successfully"
+        exit 1
+    fi
+    
+    local dist_file_count=$(find "/usr/local/r-panel/web/dist" -type f | wc -l)
+    log_success "Web directory copied successfully ($dist_file_count files in dist)"
     
     # Copy backend-specific directories
     set +e
