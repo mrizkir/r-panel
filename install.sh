@@ -648,8 +648,7 @@ install_utilities() {
         ca-certificates \
         gnupg \
         lsb-release \
-        quota \
-        quota-tools
+        quota
     
     if [ "$VERBOSE_MODE" = true ]; then
         log_success "Basic utilities installed"
