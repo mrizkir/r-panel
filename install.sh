@@ -1508,6 +1508,195 @@ create_swap() {
     fi
 }
 
+# Setup MySQL database for R-Panel
+setup_mysql_database() {
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Setting up MySQL database for R-Panel..."
+    fi
+    
+    # Generate secure random password for MySQL user
+    MYSQL_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
+    
+    # Generate secure random password for admin user
+    ADMIN_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-20)
+    
+    # Check if MariaDB/MySQL is running
+    if ! systemctl is-active --quiet mariadb && ! systemctl is-active --quiet mysql; then
+        log_warning "MariaDB/MySQL is not running. Starting service..."
+        systemctl start mariadb >> "$LOG_FILE" 2>&1 || systemctl start mysql >> "$LOG_FILE" 2>&1
+        sleep 2
+    fi
+    
+    # Try to connect to MySQL as root (try without password first, then with sudo)
+    set +e
+    trap - ERR
+    
+    # Try connecting without password (fresh install)
+    mysql -u root -e "SELECT 1" >> "$LOG_FILE" 2>&1
+    local mysql_connect_result=$?
+    
+    if [ $mysql_connect_result -ne 0 ]; then
+        # Try with sudo (some systems require sudo for root MySQL access)
+        sudo mysql -u root -e "SELECT 1" >> "$LOG_FILE" 2>&1
+        mysql_connect_result=$?
+        MYSQL_CMD="sudo mysql"
+    else
+        MYSQL_CMD="mysql"
+    fi
+    
+    set -e
+    trap 'error_exit $LINENO' ERR
+    
+    if [ $mysql_connect_result -ne 0 ]; then
+        log_warning "Cannot connect to MySQL as root without password"
+        log_info "You will need to setup MySQL database manually:"
+        log_info "  1. Run: mysql_secure_installation"
+        log_info "  2. Login: mysql -u root -p"
+        log_info "  3. Create database: CREATE DATABASE rpanel;"
+        log_info "  4. Create user: CREATE USER 'rpanel'@'localhost' IDENTIFIED BY 'password';"
+        log_info "  5. Grant privileges: GRANT ALL ON rpanel.* TO 'rpanel'@'localhost';"
+        log_info "  6. Update /usr/local/r-panel/configs/config.yaml with credentials"
+        # Still save admin password even if MySQL setup fails
+        echo "$ADMIN_PASSWORD" > /tmp/r-panel-admin-password.txt
+        chmod 600 /tmp/r-panel-admin-password.txt
+        return 0
+    fi
+    
+    # Create database if not exists
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Creating database 'rpanel'..."
+    fi
+    
+    $MYSQL_CMD -u root <<EOF >> "$LOG_FILE" 2>&1
+CREATE DATABASE IF NOT EXISTS rpanel CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+EOF
+    
+    # Check if user already exists
+    USER_EXISTS=$($MYSQL_CMD -u root -sN -e "SELECT COUNT(*) FROM mysql.user WHERE User='rpanel' AND Host='localhost';" 2>> "$LOG_FILE" || echo "0")
+    
+    if [ "$USER_EXISTS" = "0" ]; then
+        # Create user
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Creating MySQL user 'rpanel'..."
+        fi
+        
+        $MYSQL_CMD -u root <<EOF >> "$LOG_FILE" 2>&1
+CREATE USER IF NOT EXISTS 'rpanel'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';
+GRANT ALL PRIVILEGES ON rpanel.* TO 'rpanel'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+        
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "MySQL user 'rpanel' created with generated password"
+        fi
+    else
+        # User exists, check if we need to update password
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "MySQL user 'rpanel' already exists"
+        fi
+        
+        # Try to update password (may fail if user has different auth method)
+        $MYSQL_CMD -u root <<EOF >> "$LOG_FILE" 2>&1 || true
+ALTER USER 'rpanel'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';
+FLUSH PRIVILEGES;
+EOF
+        
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Updated password for existing user 'rpanel'"
+        fi
+    fi
+    
+    # Verify connection with new credentials
+    set +e
+    mysql -u rpanel -p"${MYSQL_PASSWORD}" -e "SELECT 1" rpanel >> "$LOG_FILE" 2>&1
+    local verify_result=$?
+    set -e
+    
+    if [ $verify_result -eq 0 ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "MySQL database setup verified successfully"
+        fi
+        
+        # Save passwords to temporary files
+        echo "$MYSQL_PASSWORD" > /tmp/r-panel-mysql-password.txt
+        chmod 600 /tmp/r-panel-mysql-password.txt
+        
+        echo "$ADMIN_PASSWORD" > /tmp/r-panel-admin-password.txt
+        chmod 600 /tmp/r-panel-admin-password.txt
+        
+        # Update config.yaml if it exists
+        if [ -f /usr/local/r-panel/configs/config.yaml ]; then
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Updating config.yaml with MySQL credentials and admin password..."
+            fi
+            
+            # Update MySQL settings - use more precise sed patterns
+            sed -i "s|host:.*mysql.*|host: \"localhost\"|" /usr/local/r-panel/configs/config.yaml
+            sed -i "s|host: \"mysql\"|host: \"localhost\"|" /usr/local/r-panel/configs/config.yaml
+            
+            # Update MySQL username, password, and database
+            sed -i "/^  mysql:/,/^[^ ]/ {
+                s|username:.*|username: \"rpanel\"|
+                s|password:.*|password: \"${MYSQL_PASSWORD}\"|
+                s|database:.*|database: \"rpanel\"|
+            }" /usr/local/r-panel/configs/config.yaml
+            
+            # Update admin password in default_user section
+            sed -i '/^default_user:/,/^[^ ]/ {
+                s/^  password:.*/  password: "'"${ADMIN_PASSWORD}"'" # Auto-generated - CHANGE ON FIRST LOGIN/
+            }' /usr/local/r-panel/configs/config.yaml
+            
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_success "config.yaml updated with MySQL credentials and admin password"
+            fi
+        else
+            # Create config.yaml from example if it doesn't exist
+            if [ -f /usr/local/r-panel/configs/config.example.yaml ]; then
+                cp /usr/local/r-panel/configs/config.example.yaml /usr/local/r-panel/configs/config.yaml >> "$LOG_FILE" 2>&1
+                
+                # Update MySQL settings
+                sed -i "s|host:.*|host: \"localhost\"|" /usr/local/r-panel/configs/config.yaml
+                sed -i "/^  mysql:/,/^[^ ]/ {
+                    s|username:.*|username: \"rpanel\"|
+                    s|password:.*|password: \"${MYSQL_PASSWORD}\"|
+                    s|database:.*|database: \"rpanel\"|
+                }" /usr/local/r-panel/configs/config.yaml
+                
+                # Update admin password
+                sed -i '/^default_user:/,/^[^ ]/ {
+                    s/^  password:.*/  password: "'"${ADMIN_PASSWORD}"'" # Auto-generated - CHANGE ON FIRST LOGIN/
+                }' /usr/local/r-panel/configs/config.yaml
+                
+                if [ "$VERBOSE_MODE" = true ]; then
+                    log_success "Created config.yaml from example with MySQL credentials and admin password"
+                fi
+            fi
+        fi
+        
+        # Display passwords (user needs to save them)
+        echo ""
+        log_warning "IMPORTANT: Save these credentials:"
+        echo "  MySQL Database:"
+        echo "    Username: rpanel"
+        echo "    Password: ${MYSQL_PASSWORD}"
+        echo "    Database: rpanel"
+        echo ""
+        echo "  R-Panel Admin Login:"
+        echo "    Username: admin"
+        echo "    Password: ${ADMIN_PASSWORD}"
+        echo ""
+        echo "  (Passwords also saved in /tmp/r-panel-*-password.txt - will be deleted on reboot)"
+        echo ""
+        
+    else
+        log_warning "Failed to verify MySQL connection with new credentials"
+        log_info "You may need to setup database manually"
+        # Still save admin password
+        echo "$ADMIN_PASSWORD" > /tmp/r-panel-admin-password.txt
+        chmod 600 /tmp/r-panel-admin-password.txt
+    fi
+}
+
 # Detect R-Panel source code location
 detect_rpanel_source() {
     local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1985,14 +2174,42 @@ display_info() {
         echo ""
     fi
     
+    echo "MySQL Database Setup:"
+    if [ -f /tmp/r-panel-mysql-password.txt ]; then
+        MYSQL_PASS=$(cat /tmp/r-panel-mysql-password.txt)
+        echo "  ✓ Database: rpanel"
+        echo "  ✓ Username: rpanel"
+        echo "  ✓ Password: ${MYSQL_PASS}"
+    else
+        echo "  ⚠  Database setup may need manual configuration"
+        echo "     Run: mysql_secure_installation"
+        echo "     Then create database and user manually"
+    fi
+    echo ""
+    
+    echo "R-Panel Admin Login:"
+    if [ -f /tmp/r-panel-admin-password.txt ]; then
+        ADMIN_PASS=$(cat /tmp/r-panel-admin-password.txt)
+        echo "  ✓ Username: admin"
+        echo "  ✓ Password: ${ADMIN_PASS}"
+        echo "  ⚠  IMPORTANT: Change this password on first login!"
+    else
+        echo "  ⚠  Admin password may need manual configuration"
+        echo "     Default: username=admin, password=changeme"
+    fi
+    echo ""
+    if [ -f /tmp/r-panel-mysql-password.txt ] || [ -f /tmp/r-panel-admin-password.txt ]; then
+        echo "  ⚠  IMPORTANT: Save all passwords! They're stored in /tmp/r-panel-*-password.txt"
+        echo "     (These files will be deleted on reboot)"
+    fi
+    echo ""
+    
     echo "Next Steps:"
     
     if [ -d /usr/local/r-panel ]; then
-        echo "  1. Configure R-Panel:"
+        echo "  1. Configure R-Panel (if needed):"
         echo "     - Edit: nano /usr/local/r-panel/configs/config.yaml"
-        echo "     - Set host: 127.0.0.1, port: 8081 (internal port)"
-        echo "     - If config.yaml doesn't exist, copy from example:"
-        echo "       cp /usr/local/r-panel/configs/config.example.yaml /usr/local/r-panel/configs/config.yaml"
+        echo "     - Config should already be set with auto-generated credentials"
         echo "  2. Setup SSL certificate for R-Panel (after DNS is configured):"
         if [ -n "$SERVER_NAME" ] && [ "$SERVER_NAME" != "default" ]; then
             echo "     certbot --nginx -d ${SERVER_NAME} --email your-email@example.com"
@@ -2001,13 +2218,17 @@ display_info() {
         fi
         echo "     Note: If certbot fails, temporarily comment SSL lines in:"
         echo "     /etc/nginx/sites-available/r-panel"
-        echo "  3. Run: mysql_secure_installation"
-        echo "  4. Create database for R-Panel:"
-        echo "     mysql -e \"CREATE DATABASE rpanel;\""
-        echo "     mysql -e \"CREATE USER 'rpanel'@'localhost' IDENTIFIED BY 'your_password';\""
-        echo "     mysql -e \"GRANT ALL ON rpanel.* TO 'rpanel'@'localhost';\""
-        echo "  5. Update database config in R-Panel configuration file"
-        echo "  6. Restart services:"
+        if [ ! -f /tmp/r-panel-mysql-password.txt ]; then
+            echo "  3. Run: mysql_secure_installation"
+            echo "  4. Create database for R-Panel:"
+            echo "     mysql -e \"CREATE DATABASE rpanel;\""
+            echo "     mysql -e \"CREATE USER 'rpanel'@'localhost' IDENTIFIED BY 'your_password';\""
+            echo "     mysql -e \"GRANT ALL ON rpanel.* TO 'rpanel'@'localhost';\""
+            echo "  5. Update database config in R-Panel configuration file"
+            echo "  6. Restart services:"
+        else
+            echo "  3. Restart services (if needed):"
+        fi
         echo "     systemctl restart r-panel nginx"
     else
         echo "  1. Run: mysql_secure_installation"
@@ -2146,6 +2367,9 @@ main() {
     setup_disk_quota
     optimize_php_fpm
     create_swap
+    
+    # Setup MySQL database for R-Panel (before compiling)
+    setup_mysql_database
     
     # Compile and install R-Panel if source exists
     compile_and_install_rpanel

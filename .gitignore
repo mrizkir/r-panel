@@ -26,6 +26,8 @@ go.work.sum
 
 # env file
 .env
+.env.local
+.env.*.local
 
 # Configuration files (contain sensitive data)
 backend/configs/config.yaml
@@ -40,3 +42,7 @@ errors.log
 
 # Frontend build output
 backend/web/dist/
+
+# Docker
+.docker/
+docker-compose.override.yml
