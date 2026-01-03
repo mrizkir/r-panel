@@ -90,7 +90,9 @@ show_progress() {
     
     # Flush output
     if command -v sync &> /dev/null; then
-        sync
+        set +e  # Temporarily disable exit on error
+        sync > /dev/null 2>&1
+        set -e  # Re-enable exit on error
     fi
     
     if [ "$CURRENT_STEP" -eq "$TOTAL_STEPS" ]; then
@@ -109,14 +111,27 @@ execute() {
     if [ "$VERBOSE_MODE" = true ]; then
         echo ""
         log_info "$description"
-        if ! "$@" 2>&1 | tee -a "$LOG_FILE"; then
-            log_error "Failed: $description"
+        set +e  # Temporarily disable exit on error for this command
+        if "$@" 2>&1 | tee -a "$LOG_FILE"; then
+            local exit_code=0
+        else
+            local exit_code=${PIPESTATUS[0]}
+        fi
+        set -e  # Re-enable exit on error
+        
+        if [ $exit_code -ne 0 ]; then
+            log_error "Failed: $description (exit code: $exit_code)"
             return 1
         fi
     else
-        if ! "$@" >> "$LOG_FILE" 2>&1; then
+        set +e  # Temporarily disable exit on error for this command
+        "$@" >> "$LOG_FILE" 2>&1
+        local exit_code=$?
+        set -e  # Re-enable exit on error
+        
+        if [ $exit_code -ne 0 ]; then
             echo ""
-            log_error "Failed: $description"
+            log_error "Failed: $description (exit code: $exit_code)"
             log_error "Check log: $LOG_FILE"
             return 1
         fi
@@ -125,19 +140,27 @@ execute() {
 
 # Logging functions
 log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE"
+    set +e  # Temporarily disable exit on error
+    echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE" || true
+    set -e  # Re-enable exit on error
 }
 
 log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE"
+    set +e  # Temporarily disable exit on error
+    echo -e "${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE" || true
+    set -e  # Re-enable exit on error
 }
 
 log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1" | tee -a "$LOG_FILE"
+    set +e  # Temporarily disable exit on error
+    echo -e "${YELLOW}[WARNING]${NC} $1" | tee -a "$LOG_FILE" || true
+    set -e  # Re-enable exit on error
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE"
+    set +e  # Temporarily disable exit on error
+    echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE" || true
+    set -e  # Re-enable exit on error
 }
 
 # Check if running as root
@@ -177,19 +200,28 @@ disable_prompts() {
     
     # Configure needrestart to automatically restart services
     if [ -f /etc/needrestart/needrestart.conf ]; then
+        set +e  # Temporarily disable exit on error
         sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf 2>> "$LOG_FILE"
+        set -e  # Re-enable exit on error
     fi
     
     # Create needrestart config if not exists
+    set +e  # Temporarily disable exit on error
     mkdir -p /etc/needrestart >> "$LOG_FILE" 2>&1
+    set -e  # Re-enable exit on error
+    
+    set +e  # Temporarily disable exit on error
     cat > /etc/needrestart/conf.d/no-prompt.conf <<'EOF'
 # Restart services automatically without asking
 $nrconf{restart} = 'a';
 EOF
+    set -e  # Re-enable exit on error
     
     # Configure debconf for non-interactive mode
     if command -v debconf-set-selections &> /dev/null; then
+        set +e  # Temporarily disable exit on error
         echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections >> "$LOG_FILE" 2>&1
+        set -e  # Re-enable exit on error
     else
         log_warning "debconf-set-selections not found, skipping debconf configuration"
     fi
@@ -205,7 +237,9 @@ EOF
 update_system() {
     # Configure apt to not ask questions
     if command -v debconf-set-selections &> /dev/null; then
+        set +e  # Temporarily disable exit on error
         echo 'libc6 libraries/restart-without-asking boolean true' | debconf-set-selections >> "$LOG_FILE" 2>&1
+        set -e  # Re-enable exit on error
     fi
     
     execute "Updating system packages" apt-get update -y
@@ -974,6 +1008,11 @@ main() {
     fi
     
     disable_prompts
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Non-interactive mode setup completed"
+        log_info "Starting system update..."
+    fi
     
     # Installation steps
     update_system
