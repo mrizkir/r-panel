@@ -6,9 +6,13 @@
 # For international users
 #
 # Usage:
-#   ./install.sh           # Quiet mode with progress bar (default)
-#   ./install.sh --verbose # Show all installation output
-#   ./install.sh --quiet   # Same as default, quiet with progress
+#   ./install.sh                                    # Quiet mode with progress bar (default)
+#   ./install.sh --verbose                          # Show all installation output
+#   ./install.sh --quiet                            # Same as default, quiet with progress
+#   ./install.sh --server-name dev.example.com      # Set server name via parameter
+#   ./install.sh --server-ip 192.168.1.100         # Set server IP via parameter
+#   ./install.sh -n dev.example.com -i 192.168.1.100 --verbose  # Combined options
+#   ./install.sh --help                             # Show help message
 #==============================================================================
 
 # Auto re-execute with bash if not running with bash
@@ -18,6 +22,74 @@ fi
 
 set -e  # Exit on error
 
+# Lock file management functions
+check_lock_file() {
+    if [ -f "$LOCK_FILE" ]; then
+        local lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+        local lock_age=$(stat -c %Y "$LOCK_FILE" 2>/dev/null || stat -f %m "$LOCK_FILE" 2>/dev/null || echo "0")
+        local current_time=$(date +%s)
+        local age_seconds=$((current_time - lock_age))
+        
+        # If lock file is older than 2 hours, consider it stale
+        if [ $age_seconds -gt 7200 ]; then
+            echo "[WARNING] Stale lock file detected (older than 2 hours). Removing..." >&2
+            rm -f "$LOCK_FILE" >> "$LOG_FILE" 2>&1 || true
+            return 0
+        fi
+        
+        # Check if the process that created the lock is still running
+        if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+            echo "[ERROR] Installation is already running (PID: $lock_pid)" >&2
+            echo "[ERROR] Lock file: $LOCK_FILE" >&2
+            echo "[ERROR] If you're sure no installation is running, remove the lock file:" >&2
+            echo "[ERROR]   rm -f $LOCK_FILE" >&2
+            exit 1
+        else
+            echo "[WARNING] Lock file exists but process is not running. Removing stale lock..." >&2
+            rm -f "$LOCK_FILE" >> "$LOG_FILE" 2>&1 || true
+        fi
+    fi
+}
+
+create_lock_file() {
+    # Check for existing lock first
+    check_lock_file
+    
+    # Create lock file with current PID
+    echo $$ > "$LOCK_FILE" 2>> "$LOG_FILE" || {
+        echo "[ERROR] Failed to create lock file: $LOCK_FILE" >&2
+        exit 1
+    }
+    
+    # Set trap to remove lock on script exit (normal or error)
+    # Use trap with - to append, not replace existing traps
+    trap 'remove_lock_file' EXIT INT TERM HUP
+    
+    # Log to file if available, otherwise just echo
+    if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+        echo "Lock file created: $LOCK_FILE (PID: $$)" >> "$LOG_FILE" 2>&1 || true
+    fi
+}
+
+remove_lock_file() {
+    if [ -f "$LOCK_FILE" ]; then
+        # Verify this process owns the lock
+        local lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+        if [ "$lock_pid" = "$$" ] || [ -z "$lock_pid" ]; then
+            rm -f "$LOCK_FILE" >> "$LOG_FILE" 2>&1 || true
+            # Log to file if available
+            if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+                echo "Lock file removed: $LOCK_FILE" >> "$LOG_FILE" 2>&1 || true
+            fi
+        else
+            # Only warn if logging functions are available
+            if command -v log_warning &> /dev/null; then
+                log_warning "Lock file belongs to different process (PID: $lock_pid). Not removing."
+            fi
+        fi
+    fi
+}
+
 # Error handler
 error_exit() {
     local line_no=$1
@@ -26,6 +98,10 @@ error_exit() {
     log_error "Check log file for details: $LOG_FILE"
     log_error "Last 20 lines of log:"
     tail -20 "$LOG_FILE" 2>/dev/null || echo "Log file not found"
+    
+    # Remove lock file on error
+    remove_lock_file
+    
     exit 1
 }
 
@@ -40,8 +116,42 @@ export COMPOSER_ALLOW_SUPERUSER=1
 
 # Parse arguments
 VERBOSE_MODE=false
-for arg in "$@"; do
-    case $arg in
+SERVER_NAME_PARAM=""
+SERVER_IP_PARAM=""
+
+# Function to show usage
+show_usage() {
+    cat <<EOF
+R-Panel Installation Script
+
+Usage:
+    ./install.sh [OPTIONS]
+
+Options:
+    --verbose, -v              Show detailed installation output
+    --quiet, -q                Quiet mode with progress bar (default)
+    --server-name, -n NAME     Set server name/domain (e.g., panel.example.com)
+    --server-ip, -i IP         Set server IP address (e.g., 192.168.1.100)
+    --help, -h                 Show this help message
+
+Examples:
+    ./install.sh
+    ./install.sh --verbose
+    ./install.sh --server-name dev.yacanet.com --server-ip 107.173.52.177
+    ./install.sh -n panel.example.com -i 192.168.1.100 --verbose
+
+Environment Variables:
+    R_PANEL_SERVER_NAME        Server name/domain
+    R_PANEL_SERVER_IP          Server IP address
+    SSL_EMAIL                  Email for Let's Encrypt certificate
+
+EOF
+    exit 0
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
         --verbose|-v)
             VERBOSE_MODE=true
             shift
@@ -50,11 +160,40 @@ for arg in "$@"; do
             VERBOSE_MODE=false
             shift
             ;;
+        --server-name|-n)
+            if [ -z "$2" ]; then
+                echo "Error: --server-name requires a value" >&2
+                echo "Use --help for usage information" >&2
+                exit 1
+            fi
+            SERVER_NAME_PARAM="$2"
+            shift 2
+            ;;
+        --server-ip|-i)
+            if [ -z "$2" ]; then
+                echo "Error: --server-ip requires a value" >&2
+                echo "Use --help for usage information" >&2
+                exit 1
+            fi
+            SERVER_IP_PARAM="$2"
+            shift 2
+            ;;
+        --help|-h)
+            show_usage
+            ;;
+        *)
+            echo "Error: Unknown option: $1" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
+            ;;
     esac
 done
 
 # Installation log file
 LOG_FILE="/tmp/r-panel-install-$(date +%Y%m%d_%H%M%S).log"
+
+# Lock file to prevent multiple installations
+LOCK_FILE="/tmp/r-panel-install.lock"
 
 # Color codes for output
 RED='\033[0;31m'
@@ -269,6 +408,15 @@ wait_for_apt_lock() {
 
 # Prompt for server name
 prompt_server_name() {
+    # Check if server name is already set via command line parameter (highest priority)
+    if [ -n "$SERVER_NAME_PARAM" ]; then
+        SERVER_NAME="$SERVER_NAME_PARAM"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Server name set from command line parameter: $SERVER_NAME"
+        fi
+        return 0
+    fi
+    
     # Check if server name is already set via environment variable
     if [ -n "$R_PANEL_SERVER_NAME" ]; then
         SERVER_NAME="$R_PANEL_SERVER_NAME"
@@ -396,6 +544,15 @@ detect_ip_addresses() {
 
 # Prompt for server IP address
 prompt_server_ip() {
+    # Check if server IP is already set via command line parameter (highest priority)
+    if [ -n "$SERVER_IP_PARAM" ]; then
+        SERVER_IP="$SERVER_IP_PARAM"
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Server IP set from command line parameter: $SERVER_IP"
+        fi
+        return 0
+    fi
+    
     # Check if server IP is already set via environment variable
     if [ -n "$R_PANEL_SERVER_IP" ]; then
         SERVER_IP="$R_PANEL_SERVER_IP"
@@ -2658,9 +2815,13 @@ main() {
     
     check_root
     
+    # Create lock file to prevent multiple installations
+    create_lock_file
+    
     # Wait for apt locks before starting installation
     if ! wait_for_apt_lock; then
         log_error "Cannot proceed with installation. Please resolve apt lock issues and try again."
+        remove_lock_file
         exit 1
     fi
     
@@ -2751,6 +2912,9 @@ main() {
     echo ""
     log_warning "IMPORTANT: Reboot the server to ensure all configurations are active"
     echo ""
+    
+    # Remove lock file on successful completion
+    remove_lock_file
 }
 
 # Run main installation
