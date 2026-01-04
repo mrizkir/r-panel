@@ -1547,37 +1547,38 @@ create_rpanel_nginx_config() {
     
     # Now create nginx config (certificate is guaranteed to exist)
     if [ "$VERBOSE_MODE" = true ]; then
-        log_info "Creating Nginx configuration with SSL support..."
+        log_info "Creating Nginx configuration with HTTPS support..."
+        log_info "Certificate path: $CERT_FILE"
+        log_info "Private key path: $KEY_FILE"
     fi
     
-    # Remove old config if exists
-    rm -f /etc/nginx/sites-available/r-panel /etc/nginx/sites-enabled/r-panel >> "$LOG_FILE" 2>&1 || true
+    # Clean up old configs completely
+    rm -f /etc/nginx/sites-available/r-panel >> "$LOG_FILE" 2>&1 || true
+    rm -f /etc/nginx/sites-enabled/r-panel >> "$LOG_FILE" 2>&1 || true
+    rm -f /etc/nginx/sites-enabled/r-panel.conf >> "$LOG_FILE" 2>&1 || true
+    rm -f /etc/nginx/conf.d/r-panel.conf >> "$LOG_FILE" 2>&1 || true
     
-    # Create Nginx config for R-Panel with HTTPS enabled (like ISPConfig)
-    # SSL certificate is guaranteed to exist from previous step
-    cat > /etc/nginx/sites-available/r-panel <<EOF
-# HTTP server - redirect to HTTPS
-server {
-    listen 8080;
-    listen [::]:8080;
-    server_name _;  # Catch-all for all domains
-
-    # Redirect all HTTP traffic to HTTPS
-    return 301 https://\$host\$request_uri;
-}
-
-# HTTPS server - SSL enabled by default (like ISPConfig)
-# Supports multiple domains via SNI (Server Name Indication)
-server {
-    # SSL Certificate paths (must be defined before listen ... ssl)
-    # Default: self-signed certificate (created during installation)
-    # Will be updated by certbot when Let's Encrypt certificate is obtained
-    ssl_certificate ${CERT_FILE};
-    ssl_certificate_key ${KEY_FILE};
+    # Create temp config file first (to avoid shell escaping issues)
+    local TEMP_CONFIG="/tmp/r-panel-nginx-$$.conf"
     
+    # Write config header without variable expansion
+    cat > "$TEMP_CONFIG" << 'CONFIGHEADER'
+# R-Panel Nginx Configuration
+# HTTPS Server on Port 8080
+# Auto-generated during installation
+
+server {
     listen 8080 ssl http2;
     listen [::]:8080 ssl http2;
-    server_name _;  # Catch-all for all domains (SNI will handle domain-specific certificates)
+    server_name _;
+CONFIGHEADER
+    
+    # Append SSL certificate lines with variable expansion
+    cat >> "$TEMP_CONFIG" << CONFIGSSL
+
+    # SSL Certificate (self-signed, replace with Let's Encrypt if needed)
+    ssl_certificate ${CERT_FILE};
+    ssl_certificate_key ${KEY_FILE};
 
     # SSL Configuration (modern, secure)
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -1598,16 +1599,16 @@ server {
     access_log /var/log/nginx/r-panel-access.log;
     error_log /var/log/nginx/r-panel-error.log;
 
-    # Increase body size for file uploads
+    # Upload size limits
     client_max_body_size 100M;
     client_body_buffer_size 128k;
 
-    # Proxy to backend Go application
+    # Proxy to R-Panel backend (Go application on port 8081)
     location / {
         proxy_pass http://127.0.0.1:8081;
         proxy_http_version 1.1;
         
-        # Essential headers
+        # Essential proxy headers
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1615,7 +1616,7 @@ server {
         proxy_set_header X-Forwarded-Host \$host;
         proxy_set_header X-Forwarded-Port \$server_port;
         
-        # WebSocket support (if needed in future)
+        # WebSocket support
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         
@@ -1628,18 +1629,18 @@ server {
         proxy_buffering off;
         proxy_request_buffering off;
         
-        # Don't pass these headers
+        # Don't pass encoding to backend
         proxy_set_header Accept-Encoding "";
     }
 
-    # Health check endpoint (optional)
+    # Health check endpoint
     location /health {
         access_log off;
         proxy_pass http://127.0.0.1:8081/health;
         proxy_set_header Host \$host;
     }
 
-    # Static files caching (if served directly)
+    # Static files caching
     location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)$ {
         proxy_pass http://127.0.0.1:8081;
         proxy_set_header Host \$host;
@@ -1647,12 +1648,18 @@ server {
         add_header Cache-Control "public, immutable";
     }
 }
-EOF
-
+CONFIGSSL
+    
+    # Move temp config to final location
+    mv "$TEMP_CONFIG" /etc/nginx/sites-available/r-panel >> "$LOG_FILE" 2>&1
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_success "Nginx configuration created"
+        log_info "SSL Certificate paths verified in config"
+    fi
+    
     # Enable the site
-    set +e
-    ln -sf /etc/nginx/sites-available/r-panel /etc/nginx/sites-enabled/r-panel 2>> "$LOG_FILE" || true
-    set -e
+    ln -sf /etc/nginx/sites-available/r-panel /etc/nginx/sites-enabled/r-panel >> "$LOG_FILE" 2>&1
     
     # Test Nginx config
     set +e
@@ -1662,20 +1669,29 @@ EOF
     
     if [ $nginx_test_result -eq 0 ]; then
         if [ "$VERBOSE_MODE" = true ]; then
-            log_success "Nginx configuration for R-Panel created and tested successfully"
+            log_success "Nginx configuration test PASSED"
         fi
         # Reload Nginx
         systemctl reload nginx >> "$LOG_FILE" 2>&1 || true
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "Nginx reloaded successfully"
+        fi
     else
-        log_error "Nginx configuration test failed!"
-        log_error "Certificate files:"
-        log_error "  Certificate: $CERT_FILE (exists: $([ -f "$CERT_FILE" ] && echo 'yes' || echo 'no'))"
-        log_error "  Private key: $KEY_FILE (exists: $([ -f "$KEY_FILE" ] && echo 'yes' || echo 'no'))"
-        log_error "Check nginx error log for details:"
-        log_error "  tail -20 $LOG_FILE"
+        log_error "Nginx configuration test FAILED"
+        log_error "Certificate files verification:"
+        log_error "  Certificate: $CERT_FILE (exists: $([ -f "$CERT_FILE" ] && echo 'yes' || echo 'no'), size: $(stat -c%s "$CERT_FILE" 2>/dev/null || echo '0') bytes)"
+        log_error "  Private key: $KEY_FILE (exists: $([ -f "$KEY_FILE" ] && echo 'yes' || echo 'no'), size: $(stat -c%s "$KEY_FILE" 2>/dev/null || echo '0') bytes)"
+        log_error "Check logs for details:"
+        log_error "  tail -30 $LOG_FILE"
         log_error "  nginx -t"
+        log_error ""
+        log_error "Config file first 20 lines:"
+        head -20 /etc/nginx/sites-available/r-panel >> "$LOG_FILE" 2>&1
         return 1
     fi
+    
+    # Clean up temp file
+    rm -f "$TEMP_CONFIG" >> "$LOG_FILE" 2>&1 || true
 }
 
 # Setup SSL certificate for R-Panel
@@ -2599,18 +2615,18 @@ display_info() {
     fi
     
     if [ -d /usr/local/r-panel ]; then
-        echo "Access R-Panel (HTTPS enabled by default):"
+        echo "Access R-Panel (HTTPS-only mode):"
         if [ -n "$SERVER_NAME" ] && [ "$SERVER_NAME" != "default" ]; then
-            echo "  • Primary Access: https://$SERVER_NAME:8080 (self-signed certificate)"
-            echo "  • IP Access: https://$SERVER_IP:8080"
+            echo "  • Primary: https://${SERVER_NAME}:8080"
+            echo "  • IP: https://${SERVER_IP}:8080"
         else
-            echo "  • Primary Access: https://$SERVER_IP:8080 (self-signed certificate)"
-            echo "  • With Domain: https://your-domain.com:8080"
+            echo "  • Primary: https://${SERVER_IP}:8080"
+            echo "  • Domain: https://your-domain.com:8080"
         fi
         echo ""
-        echo "  ℹ️  HTTP traffic (port 8080) automatically redirects to HTTPS"
-        echo "  ℹ️  Browser will show security warning (normal for self-signed cert)"
-        echo "  ℹ️  Accept the warning or upgrade to Let's Encrypt (see Next Steps)"
+        echo "  ℹ️  HTTPS-only mode (HTTP won't work on port 8080)"
+        echo "  ℹ️  Self-signed certificate - browser will show security warning"
+        echo "  ℹ️  Click 'Advanced' → 'Proceed to site' to continue"
         echo ""
         echo "NOTE: Multi-tenant support - clients access on their own domains:"
         echo "      https://client1.com:8080"
@@ -2651,18 +2667,31 @@ display_info() {
     echo "Next Steps:"
     
     if [ -d /usr/local/r-panel ]; then
-        echo "  1. Configure R-Panel (if needed):"
+        echo "  1. Access R-Panel:"
+        echo "     - Open browser and go to: https://${SERVER_NAME}:8080"
+        echo "     - Accept security warning (self-signed certificate)"
+        echo "     - Login with admin credentials shown above"
+        echo ""
+        echo "  2. Configure R-Panel (if needed):"
         echo "     - Edit: nano /usr/local/r-panel/configs/config.yaml"
-        echo "     - Config should already be set with auto-generated credentials"
-        echo "  2. SSL Certificate Status:"
-        echo "     - ✓ HTTPS is ENABLED with self-signed certificate (ready to use)"
-        echo "     - Browser will show security warning (normal for self-signed cert)"
-        echo "     - To upgrade to Let's Encrypt (after DNS is configured):"
+        echo "     - Config already set with auto-generated credentials"
+        echo ""
+        echo "  3. SSL Certificate Status:"
+        echo "     - ✓ HTTPS ENABLED with self-signed certificate"
+        echo "     - Browser will show security warning (normal)"
+        echo "     - To upgrade to Let's Encrypt (after DNS configured):"
         if [ -n "$SERVER_NAME" ] && [ "$SERVER_NAME" != "default" ]; then
-            echo "       certbot --nginx -d ${SERVER_NAME} --email your-email@example.com"
+            echo "       certbot certonly --nginx -d ${SERVER_NAME}"
+            echo "       Then update /etc/nginx/sites-available/r-panel with new cert paths"
         else
-            echo "       certbot --nginx -d panel.example.com --email your-email@example.com"
+            echo "       certbot certonly --nginx -d your-domain.com"
+            echo "       Then update /etc/nginx/sites-available/r-panel with new cert paths"
         fi
+        echo ""
+        echo "  4. Important Notes:"
+        echo "     - MUST use HTTPS:// (not HTTP://)"
+        echo "     - Port 8080 only accepts HTTPS connections"
+        echo "     - HTTP on port 8080 will not work (HTTPS-only mode)"
         if [ ! -f /tmp/r-panel-mysql-password.txt ]; then
             echo "  3. Run: mysql_secure_installation"
             echo "  4. Create database for R-Panel:"
