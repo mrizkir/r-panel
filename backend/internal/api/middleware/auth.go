@@ -35,8 +35,8 @@ func AuthMiddleware(authService *services.AuthService) gin.HandlerFunc {
 			return
 		}
 
-		// Set user in context
-		c.Set("user", session.User)
+		// Set user in context (store as pointer)
+		c.Set("user", &session.User)
 		c.Set("user_id", session.UserID)
 		c.Set("session", session)
 

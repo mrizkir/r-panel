@@ -73,7 +73,7 @@ func InitDB(cfg *config.Config) error {
 	}
 
 	// Auto migrate models
-	if err := DB.AutoMigrate(&User{}, &Session{}, &AuditLog{}); err != nil {
+	if err := DB.AutoMigrate(&User{}, &Session{}, &AuditLog{}, &Client{}, &ClientLimits{}); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 

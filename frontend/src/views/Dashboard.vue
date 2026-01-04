@@ -46,12 +46,9 @@
               <v-list-item
                 v-for="service in services"
                 :key="service.name"
+                :prepend-icon="service.active ? 'mdi-check-circle' : 'mdi-close-circle'"
+                :prepend-icon-color="service.active ? 'success' : 'error'"
               >
-                <template v-slot:prepend>
-                  <v-icon :color="service.active ? 'success' : 'error'">
-                    {{ service.active ? 'mdi-check-circle' : 'mdi-close-circle' }}
-                  </v-icon>
-                </template>
                 <v-list-item-title>{{ service.name }}</v-list-item-title>
                 <v-list-item-subtitle>{{ service.status }}</v-list-item-subtitle>
               </v-list-item>
