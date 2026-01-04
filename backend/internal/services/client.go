@@ -46,6 +46,66 @@ func (s *ClientService) GetClients() ([]models.Client, error) {
 	return clients, nil
 }
 
+// PaginationResult represents paginated result
+type PaginationResult struct {
+	Data       []models.Client `json:"data"`
+	Total      int64           `json:"total"`
+	Page       int             `json:"page"`
+	Limit      int             `json:"limit"`
+	TotalPages int             `json:"total_pages"`
+}
+
+// GetClientsPaginated returns paginated clients with preloaded User and ClientLimits
+func (s *ClientService) GetClientsPaginated(page, limit int) (*PaginationResult, error) {
+	// Default values
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 15
+	}
+	if limit > 100 {
+		limit = 100 // Maximum limit
+	}
+
+	var clients []models.Client
+	var total int64
+
+	// Count total records
+	if err := models.DB.Model(&models.Client{}).Count(&total).Error; err != nil {
+		return nil, err
+	}
+
+	// Calculate offset
+	offset := (page - 1) * limit
+
+	// Query with pagination
+	if err := models.DB.Preload("User").Preload("ClientLimits").
+		Offset(offset).
+		Limit(limit).
+		Find(&clients).Error; err != nil {
+		return nil, err
+	}
+
+	// Clear password hashes
+	for i := range clients {
+		if clients[i].User.ID != 0 {
+			clients[i].User.PasswordHash = ""
+		}
+	}
+
+	// Calculate total pages
+	totalPages := int((total + int64(limit) - 1) / int64(limit))
+
+	return &PaginationResult{
+		Data:       clients,
+		Total:      total,
+		Page:       page,
+		Limit:      limit,
+		TotalPages: totalPages,
+	}, nil
+}
+
 // GetClient returns a specific client by ID with preloaded User and ClientLimits
 func (s *ClientService) GetClient(id uint) (*models.Client, error) {
 	var client models.Client

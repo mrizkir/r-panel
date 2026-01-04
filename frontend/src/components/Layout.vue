@@ -1,6 +1,6 @@
 <template>
   <v-app>
-    <v-app-bar color="primary" dark>
+    <v-app-bar color="primary" dark class="full-width-app-bar">
       <v-toolbar-title>R-Panel</v-toolbar-title>
       <v-spacer />
       <v-menu>
@@ -36,22 +36,23 @@
         <v-tabs
           v-model="activeTab"
           mandatory
-          color="white"
-          bg-color="grey-lighten-4"
-          density="compact"
-          align-tabs="start"
+          bg-color="white"
+          color="primary"
+          slider-color="primary"
+          height="48"
           class="tabs-menu"
+          align-tabs="start"
           @update:model-value="handleTabChange"
         >
-          <v-tab value="dashboard">Dashboard</v-tab>
-          <v-tab value="client">Client</v-tab>
-          <v-tab value="sites">Sites</v-tab>
-          <v-tab value="email" disabled>Email</v-tab>
+          <v-tab value="dashboard">DASHBOARD</v-tab>
+          <v-tab value="client">CLIENT</v-tab>
+          <v-tab value="sites">SITES</v-tab>
+          <v-tab value="email" disabled>EMAIL</v-tab>
           <v-tab value="dns" disabled>DNS</v-tab>
-          <v-tab value="monitor">Monitor</v-tab>
-          <v-tab value="help" disabled>Help</v-tab>
-          <v-tab value="tools" disabled>Tools</v-tab>
-          <v-tab value="system">System</v-tab>
+          <v-tab value="monitor">MONITOR</v-tab>
+          <v-tab value="help" disabled>HELP</v-tab>
+          <v-tab value="tools" disabled>TOOLS</v-tab>
+          <v-tab value="system">SYSTEM</v-tab>
         </v-tabs>
       </template>
     </v-app-bar>
@@ -160,4 +161,19 @@ async function handleLogout() {
   router.push('/login')
 }
 </script>
+<style scoped>
+.full-width-app-bar :deep(.v-app-bar__extension) {
+  width: 100% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  max-width: 100% !important;
+  left: 0 !important;
+  right: 0 !important;
+}
+
+.full-width-app-bar :deep(.v-tabs) {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+</style>
 

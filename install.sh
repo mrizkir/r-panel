@@ -2236,6 +2236,14 @@ compile_and_install_rpanel() {
             log_success "Frontend environment configured: VITE_API_URL=$API_URL"
         fi
         
+        # Remove old dist directory before building
+        if [ -d "../backend/web/dist" ]; then
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "Removing old backend/web/dist directory..."
+            fi
+            rm -rf "../backend/web/dist" >> "$LOG_FILE" 2>&1 || true
+        fi
+        
         # Check if build script exists and build
         if grep -q '"build"' package.json; then
             log_info "Building frontend assets (output to backend/web/dist)..."
@@ -2399,6 +2407,14 @@ compile_and_install_rpanel() {
         fi
         set -e
     done
+    
+    # Remove old dist directory in installation directory before copying
+    if [ -d "/usr/local/r-panel/web/dist" ]; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_info "Removing old /usr/local/r-panel/web/dist directory..."
+        fi
+        rm -rf "/usr/local/r-panel/web/dist" >> "$LOG_FILE" 2>&1 || true
+    fi
     
     # Copy web directory separately with verification (critical for frontend)
     set +e

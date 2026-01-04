@@ -232,15 +232,53 @@ type UpdateClientLimitsRequest struct {
 	LimitOpenvzVMTemplateID *uint  `json:"limit_openvz_vm_template_id"`
 }
 
-// GetClients returns all clients
+// GetClients returns all clients with pagination support
 func (h *ClientHandler) GetClients(c *gin.Context) {
-	clients, err := h.clientService.GetClients()
+	// Check if pagination is requested
+	pageParam := c.DefaultQuery("page", "")
+	limitParam := c.DefaultQuery("limit", "")
+
+	if pageParam == "" && limitParam == "" {
+		// No pagination - return all clients (backward compatibility)
+		clients, err := h.clientService.GetClients()
+		if err != nil {
+			c.JSON(500, gin.H{"error": "Failed to get clients", "details": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"clients": clients})
+		return
+	}
+
+	// Parse pagination parameters
+	page := 1
+	limit := 15
+
+	if pageParam != "" {
+		if parsedPage, err := strconv.Atoi(pageParam); err == nil && parsedPage > 0 {
+			page = parsedPage
+		}
+	}
+
+	if limitParam != "" {
+		if parsedLimit, err := strconv.Atoi(limitParam); err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	// Get paginated clients
+	result, err := h.clientService.GetClientsPaginated(page, limit)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to get clients", "details": err.Error()})
 		return
 	}
 
-	c.JSON(200, gin.H{"clients": clients})
+	c.JSON(200, gin.H{
+		"clients":     result.Data,
+		"total":       result.Total,
+		"page":        result.Page,
+		"limit":       result.Limit,
+		"total_pages": result.TotalPages,
+	})
 }
 
 // GetClient returns a specific client

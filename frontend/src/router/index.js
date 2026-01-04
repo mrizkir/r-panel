@@ -57,6 +57,11 @@ const routes = [
         name: 'Profile',
         component: () => import('../views/Profile.vue'),
       },
+      {
+        path: 'clients',
+        name: 'ClientList',
+        component: () => import('../views/ClientsList.vue'),
+      },
     ],
   },
 ]

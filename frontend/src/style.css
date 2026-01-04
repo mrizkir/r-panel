@@ -77,3 +77,46 @@ button:focus-visible {
     background-color: #f9f9f9;
   }
 }
+
+
+.tabs-menu {
+  box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+  width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  display: flex;
+}
+
+.tabs-menu .v-tab {
+  color: #616161;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.813rem;
+  letter-spacing: 0.5px;
+  border-right: 1px solid #e0e0e0;
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: none;
+}
+
+.tabs-menu .v-tab:last-child {
+  border-right: none;
+}
+
+.tabs-menu .v-tab--selected {
+  color: #1976d2;
+  background-color: #f5f5f5;
+}
+
+.tabs-menu .v-tab:not(.v-tab--disabled):hover {
+  background-color: #fafafa;
+}
+
+.tabs-menu .v-tab--disabled {
+  color: #bdbdbd !important;
+  opacity: 0.6;
+}
+
+.tabs-menu .v-tabs-slider {
+  height: 3px;
+}

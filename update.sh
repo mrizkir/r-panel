@@ -8,7 +8,8 @@
 #   ./update.sh                      # Interactive menu
 #   ./update.sh --binary             # Update binary only
 #   ./update.sh --service            # Update service only
-#   ./update.sh --all                # Update both binary and service
+#   ./update.sh --frontend           # Update frontend only
+#   ./update.sh --all                # Update binary, service, and frontend
 #   ./update.sh --verbose            # Show detailed output
 #   ./update.sh --help               # Show help message
 #==============================================================================
@@ -36,6 +37,7 @@ LOG_FILE="/tmp/r-panel-update-$(date +%Y%m%d_%H%M%S).log"
 VERBOSE_MODE=false
 UPDATE_BINARY=false
 UPDATE_SERVICE=false
+UPDATE_FRONTEND=false
 
 # Logging functions
 log_info() {
@@ -65,7 +67,8 @@ Usage:
 Options:
     --binary, -b        Update binary only
     --service, -s       Update service only
-    --all, -a           Update both binary and service
+    --frontend, -f      Update frontend only
+    --all, -a           Update binary, service, and frontend
     --verbose, -v       Show detailed output
     --help, -h          Show this help message
 
@@ -73,7 +76,8 @@ Examples:
     ./update.sh                    # Interactive menu
     ./update.sh --binary           # Update binary only
     ./update.sh --service          # Update service only
-    ./update.sh --all --verbose    # Update both with verbose output
+    ./update.sh --frontend         # Update frontend only
+    ./update.sh --all --verbose    # Update all with verbose output
 
 EOF
 }
@@ -230,6 +234,112 @@ install_binary() {
     log_success "Binary installed successfully"
 }
 
+# Build frontend
+build_frontend() {
+    log_info "Building frontend assets..."
+    
+    get_source_dir
+    
+    # Check if frontend directory exists
+    if [ ! -d "$SOURCE_DIR/frontend" ] || [ ! -f "$SOURCE_DIR/frontend/package.json" ]; then
+        log_error "Frontend directory or package.json not found"
+        log_error "Expected: $SOURCE_DIR/frontend/package.json"
+        exit 1
+    fi
+    
+    # Remove old dist directory before building
+    if [ -d "$SOURCE_DIR/backend/web/dist" ]; then
+        log_info "Removing old backend/web/dist directory..."
+        rm -rf "$SOURCE_DIR/backend/web/dist" >> "$LOG_FILE" 2>&1 || true
+    fi
+    
+    cd "$SOURCE_DIR/frontend"
+    
+    # Check if Node.js is installed
+    if ! command -v node &> /dev/null; then
+        log_error "Node.js is not installed. Please install Node.js first."
+        exit 1
+    fi
+    
+    # Check for package manager (prefer yarn, fallback to npm)
+    local PACKAGE_MANAGER="npm"
+    local INSTALL_CMD="install"
+    local BUILD_CMD="run build"
+    
+    if command -v yarn &> /dev/null; then
+        PACKAGE_MANAGER="yarn"
+        INSTALL_CMD="install"
+        BUILD_CMD="build"
+        log_info "Using yarn as package manager"
+    else
+        log_info "Using npm as package manager"
+    fi
+    
+    # Install dependencies
+    log_info "Installing frontend dependencies..."
+    set +e
+    if [ "$VERBOSE_MODE" = true ]; then
+        $PACKAGE_MANAGER $INSTALL_CMD
+    else
+        $PACKAGE_MANAGER $INSTALL_CMD >> "$LOG_FILE" 2>&1
+    fi
+    local install_result=$?
+    set -e
+    
+    if [ $install_result -ne 0 ]; then
+        log_error "Frontend dependency installation failed"
+        log_error "Check log file for details: $LOG_FILE"
+        cd - >> "$LOG_FILE" 2>&1
+        exit 1
+    fi
+    
+    log_success "Frontend dependencies installed successfully"
+    
+    # Build frontend
+    log_info "Building frontend assets (output to backend/web/dist)..."
+    set +e
+    if [ "$VERBOSE_MODE" = true ]; then
+        $PACKAGE_MANAGER $BUILD_CMD
+    else
+        $PACKAGE_MANAGER $BUILD_CMD >> "$LOG_FILE" 2>&1
+    fi
+    local build_result=$?
+    set -e
+    
+    if [ $build_result -ne 0 ]; then
+        log_error "Frontend build failed"
+        log_error "Check log file for details: $LOG_FILE"
+        cd - >> "$LOG_FILE" 2>&1
+        exit 1
+    fi
+    
+    # Verify build output
+    if [ ! -d "../backend/web/dist" ]; then
+        log_error "Frontend build completed but backend/web/dist directory not found"
+        log_error "Expected build output at: $SOURCE_DIR/backend/web/dist"
+        cd - >> "$LOG_FILE" 2>&1
+        exit 1
+    fi
+    
+    if [ ! -f "../backend/web/dist/index.html" ]; then
+        log_error "Frontend build completed but index.html not found in backend/web/dist"
+        log_error "Build may have failed silently"
+        cd - >> "$LOG_FILE" 2>&1
+        exit 1
+    fi
+    
+    # Count files in dist to verify build succeeded
+    local dist_file_count=$(find "../backend/web/dist" -type f | wc -l)
+    if [ "$dist_file_count" -eq 0 ]; then
+        log_error "Frontend build directory is empty"
+        cd - >> "$LOG_FILE" 2>&1
+        exit 1
+    fi
+    
+    log_success "Frontend built successfully to backend/web/dist ($dist_file_count files)"
+    cd - >> "$LOG_FILE" 2>&1
+}
+
 # Update service file
 update_service() {
     log_warning "Service update is currently disabled"
@@ -317,6 +427,18 @@ update_service_function() {
     log_success "=== Service Update Complete ==="
 }
 
+# Update frontend
+update_frontend_function() {
+    log_info "=== Updating R-Panel Frontend ==="
+    
+    build_frontend
+    
+    # Restart service to serve new frontend files
+    restart_service
+    
+    log_success "=== Frontend Update Complete ==="
+}
+
 # Interactive menu
 show_menu() {
     echo ""
@@ -328,10 +450,12 @@ show_menu() {
     echo ""
     echo "  1) Update Binary Only"
     echo "  2) Update Service Only"
-    echo "  3) Update Both (Binary + Service)"
-    echo "  4) Exit"
+    echo "  3) Update Frontend Only"
+    echo "  4) Update Both (Binary + Service)"
+    echo "  5) Update All (Binary + Service + Frontend)"
+    echo "  6) Exit"
     echo ""
-    read -p "Enter your choice [1-4]: " choice
+    read -p "Enter your choice [1-6]: " choice
     
     case $choice in
         1)
@@ -341,10 +465,18 @@ show_menu() {
             UPDATE_SERVICE=true
             ;;
         3)
+            UPDATE_FRONTEND=true
+            ;;
+        4)
             UPDATE_BINARY=true
             UPDATE_SERVICE=true
             ;;
-        4)
+        5)
+            UPDATE_BINARY=true
+            UPDATE_SERVICE=true
+            UPDATE_FRONTEND=true
+            ;;
+        6)
             log_info "Exiting..."
             exit 0
             ;;
@@ -367,9 +499,14 @@ parse_args() {
                 UPDATE_SERVICE=true
                 shift
                 ;;
+            --frontend|-f)
+                UPDATE_FRONTEND=true
+                shift
+                ;;
             --all|-a)
                 UPDATE_BINARY=true
                 UPDATE_SERVICE=true
+                UPDATE_FRONTEND=true
                 shift
                 ;;
             --verbose|-v)
@@ -405,7 +542,7 @@ main() {
     check_installation
     
     # Show menu if no options specified
-    if [ "$UPDATE_BINARY" = false ] && [ "$UPDATE_SERVICE" = false ]; then
+    if [ "$UPDATE_BINARY" = false ] && [ "$UPDATE_SERVICE" = false ] && [ "$UPDATE_FRONTEND" = false ]; then
         show_menu
     fi
     
@@ -416,6 +553,10 @@ main() {
     
     if [ "$UPDATE_SERVICE" = true ]; then
         update_service_function
+    fi
+    
+    if [ "$UPDATE_FRONTEND" = true ]; then
+        update_frontend_function
     fi
     
     echo ""
@@ -429,4 +570,5 @@ main() {
 
 # Run main function
 main "$@"
+
 
