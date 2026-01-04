@@ -5,6 +5,12 @@
 # Description: Complete installation script for R-Panel hosting control panel
 # For international users
 #
+# Features:
+#   - HTTPS enabled by default with self-signed certificate (like ISPConfig)
+#   - Auto-generates MySQL and admin passwords
+#   - Multi-tenant ready (SNI support for multiple domains)
+#   - Automatic SSL certificate creation and nginx configuration
+#
 # Usage:
 #   ./install.sh                                    # Quiet mode with progress bar (default)
 #   ./install.sh --verbose                          # Show all installation output
@@ -1441,116 +1447,114 @@ create_rpanel_nginx_config() {
     # Get R-Panel domain from config or use server name
     local R_PANEL_DOMAIN="${SERVER_NAME:-panel.example.com}"
     
-    # Create temporary self-signed certificate first (so nginx can start with SSL)
-    # This will be replaced by Let's Encrypt certificate if available
-    create_temp_ssl_certificate
-    
-    # Verify certificate files exist before creating nginx config
+    # Certificate paths
     local CERT_DIR="/etc/letsencrypt/live/${R_PANEL_DOMAIN}"
     local CERT_FILE="${CERT_DIR}/fullchain.pem"
     local KEY_FILE="${CERT_DIR}/privkey.pem"
     
-    # Check if certificate files exist and are valid
-    if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
-        log_error "SSL certificate files not found at ${CERT_DIR}"
-        log_error "Certificate creation may have failed. Attempting to create again..."
-        
-        # Try to create certificate one more time
-        if ! create_temp_ssl_certificate; then
-            log_error "Failed to create SSL certificate. Creating HTTP-only configuration..."
-            log_warning "SSL will not be available. You can add SSL later by running: certbot --nginx -d ${R_PANEL_DOMAIN}"
-            
-            # Create HTTP-only config as fallback
-            cat > /etc/nginx/sites-available/r-panel <<EOF
-# HTTP server (SSL not available - certificate creation failed)
-server {
-    listen 8080;
-    listen [::]:8080;
-    server_name _;
-
-    # Logging
-    access_log /var/log/nginx/r-panel-access.log;
-    error_log /var/log/nginx/r-panel-error.log;
-
-    # Increase body size for file uploads
-    client_max_body_size 100M;
-    client_body_buffer_size 128k;
-
-    # Proxy to backend Go application
-    location / {
-        proxy_pass http://127.0.0.1:8081;
-        proxy_http_version 1.1;
-        
-        # Essential headers
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Host \$host;
-        proxy_set_header X-Forwarded-Port \$server_port;
-        
-        # WebSocket support
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        
-        # Timeouts
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-        
-        # Buffering
-        proxy_buffering off;
-        proxy_request_buffering off;
-        
-        # Don't pass these headers
-        proxy_set_header Accept-Encoding "";
-    }
-
-    # Health check endpoint
-    location /health {
-        access_log off;
-        proxy_pass http://127.0.0.1:8081/health;
-        proxy_set_header Host \$host;
-    }
-
-    # Static files caching
-    location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)$ {
-        proxy_pass http://127.0.0.1:8081;
-        proxy_set_header Host \$host;
-        expires 30d;
-        add_header Cache-Control "public, immutable";
-    }
-}
-EOF
-            # Enable the site and test
-            set +e
-            ln -sf /etc/nginx/sites-available/r-panel /etc/nginx/sites-enabled/r-panel 2>> "$LOG_FILE" || true
-            nginx -t >> "$LOG_FILE" 2>&1
-            local nginx_test_result=$?
-            set -e
-            
-            if [ $nginx_test_result -eq 0 ]; then
-                systemctl reload nginx >> "$LOG_FILE" 2>&1 || true
-                if [ "$VERBOSE_MODE" = true ]; then
-                    log_warning "R-Panel configured with HTTP only (SSL certificate creation failed)"
-                fi
-            fi
-            return 0
+    # CRITICAL: Ensure OpenSSL is installed (required for SSL certificate)
+    if ! command -v openssl &> /dev/null; then
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_warning "OpenSSL not found. Installing..."
         fi
-    fi
-    
-    # Verify files are not empty
-    if [ ! -s "$CERT_FILE" ] || [ ! -s "$KEY_FILE" ]; then
-        log_error "Certificate files are empty. Recreating..."
-        rm -f "$CERT_FILE" "$KEY_FILE" >> "$LOG_FILE" 2>&1
-        if ! create_temp_ssl_certificate; then
-            log_error "Failed to recreate certificate. See error above."
+        wait_for_apt_lock
+        apt-get install -y -qq openssl >> "$LOG_FILE" 2>&1 || {
+            log_error "Failed to install OpenSSL. Cannot create SSL certificate."
             return 1
+        }
+        if [ "$VERBOSE_MODE" = true ]; then
+            log_success "OpenSSL installed successfully"
         fi
     fi
     
-    # Create Nginx config for R-Panel
-    # SSL support is enabled by default - certificate will be setup by certbot
+    # CRITICAL: Create certificate directory (must exist)
+    mkdir -p "$CERT_DIR" >> "$LOG_FILE" 2>&1 || {
+        log_error "Failed to create certificate directory: $CERT_DIR"
+        return 1
+    }
+    
+    # CRITICAL: Generate self-signed certificate (MUST succeed for HTTPS to work)
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Generating self-signed SSL certificate for ${R_PANEL_DOMAIN}..."
+    fi
+    
+    # Remove old certificate if exists (force regenerate)
+    rm -f "$CERT_FILE" "$KEY_FILE" >> "$LOG_FILE" 2>&1 || true
+    
+    # Generate self-signed certificate with retries
+    local max_retries=3
+    local retry_count=0
+    local cert_created=false
+    
+    while [ $retry_count -lt $max_retries ] && [ "$cert_created" = false ]; do
+        set +e
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "$KEY_FILE" \
+            -out "$CERT_FILE" \
+            -subj "/C=ID/ST=Riau/L=Batam/O=R-Panel/OU=Control Panel/CN=${R_PANEL_DOMAIN}" \
+            >> "$LOG_FILE" 2>&1
+        local openssl_result=$?
+        set -e
+        
+        if [ $openssl_result -eq 0 ] && [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ] && [ -s "$CERT_FILE" ] && [ -s "$KEY_FILE" ]; then
+            cert_created=true
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_success "Self-signed SSL certificate created successfully"
+            fi
+        else
+            retry_count=$((retry_count + 1))
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_warning "Certificate creation attempt $retry_count failed. Retrying..."
+            fi
+            sleep 1
+        fi
+    done
+    
+    # Verify certificate was created successfully
+    if [ "$cert_created" = false ]; then
+        log_error "CRITICAL: Failed to create SSL certificate after $max_retries attempts"
+        log_error "Check OpenSSL installation and permissions"
+        log_error "Log file: $LOG_FILE"
+        return 1
+    fi
+    
+    # Set proper permissions
+    chmod 600 "$KEY_FILE" >> "$LOG_FILE" 2>&1 || {
+        log_warning "Failed to set permissions on private key"
+    }
+    chmod 644 "$CERT_FILE" >> "$LOG_FILE" 2>&1 || {
+        log_warning "Failed to set permissions on certificate"
+    }
+    
+    # Final verification before creating nginx config
+    if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
+        log_error "CRITICAL: Certificate files do not exist after creation"
+        log_error "  Certificate: $CERT_FILE"
+        log_error "  Private key: $KEY_FILE"
+        return 1
+    fi
+    
+    if [ ! -s "$CERT_FILE" ] || [ ! -s "$KEY_FILE" ]; then
+        log_error "CRITICAL: Certificate files are empty"
+        return 1
+    fi
+    
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Certificate files verified:"
+        log_info "  Certificate: $CERT_FILE ($(stat -c%s "$CERT_FILE" 2>/dev/null || stat -f%z "$CERT_FILE" 2>/dev/null || echo '?') bytes)"
+        log_info "  Private key: $KEY_FILE ($(stat -c%s "$KEY_FILE" 2>/dev/null || stat -f%z "$KEY_FILE" 2>/dev/null || echo '?') bytes)"
+    fi
+    
+    # Now create nginx config (certificate is guaranteed to exist)
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Creating Nginx configuration with SSL support..."
+    fi
+    
+    # Remove old config if exists
+    rm -f /etc/nginx/sites-available/r-panel /etc/nginx/sites-enabled/r-panel >> "$LOG_FILE" 2>&1 || true
+    
+    # Create Nginx config for R-Panel with HTTPS enabled (like ISPConfig)
+    # SSL certificate is guaranteed to exist from previous step
     cat > /etc/nginx/sites-available/r-panel <<EOF
 # HTTP server - redirect to HTTPS
 server {
@@ -1562,18 +1566,18 @@ server {
     return 301 https://\$host\$request_uri;
 }
 
-# HTTPS server - SSL enabled by default
+# HTTPS server - SSL enabled by default (like ISPConfig)
 # Supports multiple domains via SNI (Server Name Indication)
 server {
+    # SSL Certificate paths (must be defined before listen ... ssl)
+    # Default: self-signed certificate (created during installation)
+    # Will be updated by certbot when Let's Encrypt certificate is obtained
+    ssl_certificate ${CERT_FILE};
+    ssl_certificate_key ${KEY_FILE};
+    
     listen 8080 ssl http2;
     listen [::]:8080 ssl http2;
     server_name _;  # Catch-all for all domains (SNI will handle domain-specific certificates)
-
-    # SSL Certificate paths
-    # Default: self-signed certificate (created during installation)
-    # Will be updated by certbot when Let's Encrypt certificate is obtained
-    ssl_certificate /etc/letsencrypt/live/${R_PANEL_DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${R_PANEL_DOMAIN}/privkey.pem;
 
     # SSL Configuration (modern, secure)
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -1650,7 +1654,7 @@ EOF
     ln -sf /etc/nginx/sites-available/r-panel /etc/nginx/sites-enabled/r-panel 2>> "$LOG_FILE" || true
     set -e
     
-    # Test Nginx config (may fail if SSL cert not ready yet)
+    # Test Nginx config
     set +e
     nginx -t >> "$LOG_FILE" 2>&1
     local nginx_test_result=$?
@@ -1658,108 +1662,36 @@ EOF
     
     if [ $nginx_test_result -eq 0 ]; then
         if [ "$VERBOSE_MODE" = true ]; then
-            log_success "Nginx configuration for R-Panel created"
+            log_success "Nginx configuration for R-Panel created and tested successfully"
         fi
         # Reload Nginx
         systemctl reload nginx >> "$LOG_FILE" 2>&1 || true
     else
-        if [ "$VERBOSE_MODE" = true ]; then
-            log_warning "Nginx configuration created but test failed"
-            log_info "This is normal if SSL certificate is not setup yet"
-            log_info "Setup SSL certificate with: certbot --nginx -d ${R_PANEL_DOMAIN}"
-        fi
+        log_error "Nginx configuration test failed!"
+        log_error "Certificate files:"
+        log_error "  Certificate: $CERT_FILE (exists: $([ -f "$CERT_FILE" ] && echo 'yes' || echo 'no'))"
+        log_error "  Private key: $KEY_FILE (exists: $([ -f "$KEY_FILE" ] && echo 'yes' || echo 'no'))"
+        log_error "Check nginx error log for details:"
+        log_error "  tail -20 $LOG_FILE"
+        log_error "  nginx -t"
+        return 1
     fi
 }
 
 # Setup SSL certificate for R-Panel
+# DEPRECATED: SSL certificate setup is now integrated into create_rpanel_nginx_config()
+# This function is kept for reference but is no longer used in the installation flow
+# SSL certificate is created automatically in create_rpanel_nginx_config()
 setup_ssl_certificate() {
+    # This function is deprecated and not used anymore
+    # SSL certificate creation is now part of create_rpanel_nginx_config()
+    # which ensures certificate is created BEFORE nginx config
+    
     if [ "$VERBOSE_MODE" = true ]; then
-        log_info "Setting up SSL certificate for R-Panel..."
+        log_warning "DEPRECATED: setup_ssl_certificate() is no longer used"
+        log_info "SSL certificate is now created in create_rpanel_nginx_config()"
     fi
-    
-    # Get R-Panel domain from config or use server name
-    local R_PANEL_DOMAIN="${SERVER_NAME:-panel.example.com}"
-    
-    # Create temporary self-signed certificate first (so nginx can start)
-    create_temp_ssl_certificate
-    
-    # Skip Let's Encrypt setup if server name is not set or is default
-    if [ -z "$SERVER_NAME" ] || [ "$SERVER_NAME" = "default" ]; then
-        if [ "$VERBOSE_MODE" = true ]; then
-            log_warning "Skipping Let's Encrypt SSL setup: Server name not configured or is 'default'"
-            log_info "Using self-signed certificate. To setup Let's Encrypt later, run: certbot --nginx -d your-domain.com"
-        fi
-        return 0
-    fi
-    
-    # Check if certbot is installed
-    if ! command -v certbot &> /dev/null; then
-        if [ "$VERBOSE_MODE" = true ]; then
-            log_warning "Certbot not found. Using self-signed certificate."
-            log_info "Install certbot and run: certbot --nginx -d ${R_PANEL_DOMAIN}"
-        fi
-        return 0
-    fi
-    
-    # Check if domain resolves (basic DNS check)
-    if ! host "$R_PANEL_DOMAIN" &> /dev/null; then
-        if [ "$VERBOSE_MODE" = true ]; then
-            log_warning "Domain $R_PANEL_DOMAIN does not resolve. Using self-signed certificate."
-            log_info "Please configure DNS first, then run: certbot --nginx -d $R_PANEL_DOMAIN"
-        fi
-        return 0
-    fi
-    
-    # Try to setup Let's Encrypt SSL certificate (non-blocking)
-    if [ "$VERBOSE_MODE" = true ]; then
-        log_info "Attempting to setup Let's Encrypt SSL certificate for $R_PANEL_DOMAIN..."
-        log_info "This may require email input. Use SSL_EMAIL environment variable to set email."
-    fi
-    
-    set +e
-    trap - ERR
-    
-    # Determine email for certbot
-    local CERTBOT_EMAIL="${SSL_EMAIL:-admin@${R_PANEL_DOMAIN}}"
-    
-    # Run certbot in non-interactive mode for port 8080
-    # Note: certbot --nginx may not work directly for port 8080
-    # We'll use certbot certonly with standalone mode or manual configuration
-    certbot certonly --nginx \
-        -d "$R_PANEL_DOMAIN" \
-        --non-interactive \
-        --agree-tos \
-        --email "$CERTBOT_EMAIL" \
-        --nginx-server-root /etc/nginx \
-        >> "$LOG_FILE" 2>&1
-    
-    local certbot_result=$?
-    set -e
-    trap 'error_exit $LINENO' ERR
-    
-    if [ $certbot_result -eq 0 ]; then
-        # Update nginx config with Let's Encrypt certificate paths
-        # Certbot should have already updated the config, but we verify
-        if [ -f "/etc/letsencrypt/live/${R_PANEL_DOMAIN}/fullchain.pem" ]; then
-            # Reload nginx after SSL setup
-            systemctl reload nginx >> "$LOG_FILE" 2>&1 || true
-            
-            if [ "$VERBOSE_MODE" = true ]; then
-                log_success "Let's Encrypt SSL certificate setup successfully for $R_PANEL_DOMAIN"
-            fi
-        fi
-    else
-        if [ "$VERBOSE_MODE" = true ]; then
-            log_warning "Let's Encrypt SSL certificate setup failed for $R_PANEL_DOMAIN"
-            log_info "Using self-signed certificate. This is normal if:"
-            log_info "  - DNS is not configured yet"
-            log_info "  - Domain does not point to this server"
-            log_info "  - Port 80 is not accessible from internet"
-            log_info ""
-            log_info "To setup Let's Encrypt manually later, run:"
-            log_info "  certbot --nginx -d $R_PANEL_DOMAIN"
-        fi
-    fi
+    return 0
 }
 
 # Setup disk quota for client websites
@@ -2667,17 +2599,20 @@ display_info() {
     fi
     
     if [ -d /usr/local/r-panel ]; then
-        echo "Access R-Panel:"
-        echo "  • Direct Access: http://$SERVER_IP:8080"
+        echo "Access R-Panel (HTTPS enabled by default):"
         if [ -n "$SERVER_NAME" ] && [ "$SERVER_NAME" != "default" ]; then
-            echo "  • With Domain: http://$SERVER_NAME:8080"
-            echo "  • With SSL: https://$SERVER_NAME:8080"
+            echo "  • Primary Access: https://$SERVER_NAME:8080 (self-signed certificate)"
+            echo "  • IP Access: https://$SERVER_IP:8080"
         else
-            echo "  • With Domain: http://your-domain.com:8080"
-            echo "  • With SSL: https://your-domain.com:8080"
+            echo "  • Primary Access: https://$SERVER_IP:8080 (self-signed certificate)"
+            echo "  • With Domain: https://your-domain.com:8080"
         fi
         echo ""
-        echo "NOTE: Clients will access R-Panel on their own domains:"
+        echo "  ℹ️  HTTP traffic (port 8080) automatically redirects to HTTPS"
+        echo "  ℹ️  Browser will show security warning (normal for self-signed cert)"
+        echo "  ℹ️  Accept the warning or upgrade to Let's Encrypt (see Next Steps)"
+        echo ""
+        echo "NOTE: Multi-tenant support - clients access on their own domains:"
         echo "      https://client1.com:8080"
         echo "      https://client2.org:8080"
         echo ""
@@ -2719,14 +2654,15 @@ display_info() {
         echo "  1. Configure R-Panel (if needed):"
         echo "     - Edit: nano /usr/local/r-panel/configs/config.yaml"
         echo "     - Config should already be set with auto-generated credentials"
-        echo "  2. Setup SSL certificate for R-Panel (after DNS is configured):"
+        echo "  2. SSL Certificate Status:"
+        echo "     - ✓ HTTPS is ENABLED with self-signed certificate (ready to use)"
+        echo "     - Browser will show security warning (normal for self-signed cert)"
+        echo "     - To upgrade to Let's Encrypt (after DNS is configured):"
         if [ -n "$SERVER_NAME" ] && [ "$SERVER_NAME" != "default" ]; then
-            echo "     certbot --nginx -d ${SERVER_NAME} --email your-email@example.com"
+            echo "       certbot --nginx -d ${SERVER_NAME} --email your-email@example.com"
         else
-            echo "     certbot --nginx -d panel.example.com --email your-email@example.com"
+            echo "       certbot --nginx -d panel.example.com --email your-email@example.com"
         fi
-        echo "     Note: If certbot fails, temporarily comment SSL lines in:"
-        echo "     /etc/nginx/sites-available/r-panel"
         if [ ! -f /tmp/r-panel-mysql-password.txt ]; then
             echo "  3. Run: mysql_secure_installation"
             echo "  4. Create database for R-Panel:"
@@ -2867,7 +2803,9 @@ main() {
         log_info "Starting system update..."
     fi
     
-    # Installation steps
+    # ============================================
+    # PHASE 1: Install Dependencies
+    # ============================================
     update_system
     install_utilities
     install_nginx
@@ -2879,24 +2817,38 @@ main() {
     install_go
     install_composer
     
-    # Configuration steps
+    # ============================================
+    # PHASE 2: System Configuration
+    # ============================================
     configure_firewall
     configure_fail2ban
     create_rpanel_user
     create_rpanel_structure
     configure_rpanel_permissions
-    create_nginx_config
-    create_rpanel_nginx_config
-    setup_ssl_certificate
     setup_disk_quota
     optimize_php_fpm
     create_swap
     
-    # Setup MySQL database for R-Panel (before compiling)
-    setup_mysql_database
+    # ============================================
+    # PHASE 3: Setup User Websites Nginx Config
+    # ============================================
+    create_nginx_config  # For user websites, not R-Panel
     
-    # Compile and install R-Panel if source exists
+    # ============================================
+    # PHASE 4: Setup Database & Compile R-Panel
+    # ============================================
+    setup_mysql_database
     compile_and_install_rpanel
+    
+    # ============================================
+    # PHASE 5: Setup R-Panel Nginx (FINAL STEP)
+    # ============================================
+    # This must be last because:
+    # - OpenSSL is already installed
+    # - R-Panel binary is compiled and ready
+    # - MySQL database is configured
+    # - All dependencies are in place
+    create_rpanel_nginx_config
     
     # Clear progress bar line if in quiet mode
     if [ "$VERBOSE_MODE" = false ]; then
