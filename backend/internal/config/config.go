@@ -9,11 +9,12 @@ import (
 )
 
 type Config struct {
-	Server     ServerConfig     `yaml:"server"`
-	Database   DatabaseConfig   `yaml:"database"`
-	JWT        JWTConfig        `yaml:"jwt"`
-	Security   SecurityConfig   `yaml:"security"`
-	Paths      PathsConfig      `yaml:"paths"`
+	Environment string           `yaml:"environment"` // local, production
+	Server      ServerConfig     `yaml:"server"`
+	Database    DatabaseConfig   `yaml:"database"`
+	JWT         JWTConfig        `yaml:"jwt"`
+	Security    SecurityConfig   `yaml:"security"`
+	Paths       PathsConfig      `yaml:"paths"`
 	DefaultUser DefaultUserConfig `yaml:"default_user"`
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"r-panel/internal/config"
 	"r-panel/internal/models"
 	"r-panel/internal/services"
@@ -15,25 +16,46 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// setupTestDB initializes a test database
-func setupTestDB(t *testing.T) *config.Config {
-	// Create temporary directory for test database
-	tmpDir := os.TempDir()
-	testDBPath := fmt.Sprintf("%s/rpanel_test_%d.db", tmpDir, time.Now().UnixNano())
+// findTestConfigFile finds the config.yaml file for testing
+func findTestConfigFile() string {
+	// Try multiple locations relative to backend directory
+	possiblePaths := []string{
+		"./configs/config.yaml",
+		"../configs/config.yaml",
+		"../../configs/config.yaml",
+	}
 
-	// Create a temporary config for testing
+	for _, path := range possiblePaths {
+		absPath, err := filepath.Abs(path)
+		if err == nil {
+			if _, err := os.Stat(absPath); err == nil {
+				return absPath
+			}
+		}
+	}
+
+	return ""
+}
+
+// setupTestDB initializes a test database using existing database from config
+func setupTestDB(t *testing.T) *config.Config {
+	// Load config from config.yaml file (required)
+	configPath := findTestConfigFile()
+	require.NotEmpty(t, configPath, "config.yaml file not found. Please create configs/config.yaml")
+
+	baseCfg, err := config.Load(configPath)
+	require.NoError(t, err, "Failed to load config from %s", configPath)
+
+	// Use existing database configuration (do not create new database)
 	cfg := &config.Config{
-		Database: config.DatabaseConfig{
-			Type: "sqlite",
-			SQLite: config.SQLiteConfig{
-				Path: testDBPath,
-			},
-		},
+		Environment: baseCfg.Environment,
+		Database:    baseCfg.Database,
 		JWT: config.JWTConfig{
 			Secret:    "test-secret-key-for-testing-only",
 			ExpiresIn: "24h",
@@ -50,37 +72,90 @@ func setupTestDB(t *testing.T) *config.Config {
 	// Create backups directory if it doesn't exist
 	os.MkdirAll("./tmp/test-backups", 0755)
 
-	// Initialize database
-	err := models.InitDB(cfg)
+	// Initialize database connection (using existing database)
+	err = models.InitDB(cfg)
 	require.NoError(t, err)
 
 	return cfg
 }
 
-// cleanupTestDB cleans up test database
-func cleanupTestDB(t *testing.T, cfg *config.Config) {
-	if models.DB != nil {
-		sqlDB, err := models.DB.DB()
-		if err == nil {
-			sqlDB.Close()
+// testRecords tracks all records created during test for cleanup
+type testRecords struct {
+	UserIDs       []uint
+	ClientIDs     []uint
+	SessionIDs    []uint
+	ClientUserIDs []uint // UserIDs that were created for clients
+}
+
+// trackTestClient tracks a client created during test for cleanup
+func trackTestClient(client *models.Client, records *testRecords) {
+	if records != nil && client != nil {
+		records.ClientIDs = append(records.ClientIDs, client.ID)
+		if client.UserID != 0 {
+			records.ClientUserIDs = append(records.ClientUserIDs, client.UserID)
 		}
-		// Try to remove test database file
-		if cfg != nil && cfg.Database.Type == "sqlite" {
-			os.Remove(cfg.Database.SQLite.Path)
+	}
+}
+
+// cleanupTestDB deletes only test records and closes database connection
+func cleanupTestDB(t *testing.T, cfg *config.Config, records *testRecords) {
+	if models.DB == nil {
+		return
+	}
+
+	// Delete in reverse order of dependencies: ClientLimits -> Client -> Session -> User
+	if records != nil {
+		// Delete ClientLimits for test clients
+		if len(records.ClientIDs) > 0 {
+			models.DB.Where("client_id IN ?", records.ClientIDs).Delete(&models.ClientLimits{})
 		}
+
+		// Delete test Clients
+		if len(records.ClientIDs) > 0 {
+			models.DB.Where("id IN ?", records.ClientIDs).Delete(&models.Client{})
+		}
+
+		// Delete test Sessions
+		if len(records.SessionIDs) > 0 {
+			models.DB.Where("id IN ?", records.SessionIDs).Delete(&models.Session{})
+		}
+
+		// Delete test Users (including client users)
+		allUserIDs := append(records.UserIDs, records.ClientUserIDs...)
+		if len(allUserIDs) > 0 {
+			// Remove duplicates
+			uniqueUserIDs := make(map[uint]bool)
+			for _, id := range allUserIDs {
+				uniqueUserIDs[id] = true
+			}
+			userIDs := make([]uint, 0, len(uniqueUserIDs))
+			for id := range uniqueUserIDs {
+				userIDs = append(userIDs, id)
+			}
+			models.DB.Where("id IN ?", userIDs).Delete(&models.User{})
+		}
+	}
+
+	// Close database connection
+	sqlDB, err := models.DB.DB()
+	if err == nil {
+		sqlDB.Close()
 	}
 	models.DB = nil
 }
 
-// createTestUser creates a test user and returns it
-func createTestUser(t *testing.T, authService *services.AuthService, username, password, role string) *models.User {
+// createTestUser creates a test user and returns it, tracking in records
+func createTestUser(t *testing.T, authService *services.AuthService, username, password, role string, records *testRecords) *models.User {
 	user, err := authService.CreateUser(username, password, role)
 	require.NoError(t, err)
+	if records != nil {
+		records.UserIDs = append(records.UserIDs, user.ID)
+	}
 	return user
 }
 
-// createTestToken creates a JWT token for testing
-func createTestToken(t *testing.T, cfg *config.Config, authService *services.AuthService, user *models.User) string {
+// createTestToken creates a JWT token for testing, tracking session in records
+func createTestToken(t *testing.T, cfg *config.Config, authService *services.AuthService, user *models.User, records *testRecords) string {
 	expiresIn, _ := time.ParseDuration(cfg.JWT.ExpiresIn)
 	if expiresIn == 0 {
 		expiresIn = 24 * time.Hour
@@ -107,6 +182,14 @@ func createTestToken(t *testing.T, cfg *config.Config, authService *services.Aut
 	err = authService.CreateSession(user.ID, tokenString, expiresAt)
 	require.NoError(t, err)
 
+	// Track session by retrieving it (CreateSession doesn't return the session)
+	if records != nil {
+		session, err := authService.GetSession(tokenString)
+		if err == nil && session != nil {
+			records.SessionIDs = append(records.SessionIDs, session.ID)
+		}
+	}
+
 	return tokenString
 }
 
@@ -119,22 +202,49 @@ func setupTestRouter(cfg *config.Config) *gin.Engine {
 }
 
 func TestClientsRoutes(t *testing.T) {
+	// Load config to check environment
+	configPath := findTestConfigFile()
+	if configPath == "" {
+		t.Skip("config.yaml file not found. Skipping tests.")
+		return
+	}
+
+	baseCfg, err := config.Load(configPath)
+	if err != nil {
+		t.Skipf("Failed to load config: %v. Skipping tests.", err)
+		return
+	}
+
+	// Skip tests if environment is production
+	if baseCfg.Environment == "production" {
+		t.Skip("Tests are disabled in production environment. Set environment to 'local' in config.yaml to run tests.")
+		return
+	}
+
 	// Set environment variable to skip Linux user creation in tests
 	os.Setenv("SKIP_LINUX_USER", "true")
 	defer os.Unsetenv("SKIP_LINUX_USER")
 
 	cfg := setupTestDB(t)
-	defer cleanupTestDB(t, cfg)
+
+	// Track all records created during test
+	records := &testRecords{
+		UserIDs:       []uint{},
+		ClientIDs:     []uint{},
+		SessionIDs:    []uint{},
+		ClientUserIDs: []uint{},
+	}
+	defer cleanupTestDB(t, cfg, records)
 
 	authService := services.NewAuthService(cfg)
 
 	// Create test users
-	adminUser := createTestUser(t, authService, "admin", "admin123", "admin")
-	regularUser := createTestUser(t, authService, "user", "user123", "user")
+	adminUser := createTestUser(t, authService, "admin", "admin123", "admin", records)
+	regularUser := createTestUser(t, authService, "user", "user123", "user", records)
 
 	t.Run("GET /api/clients - Success with admin", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, adminUser)
+		token := createTestToken(t, cfg, authService, adminUser, records)
 
 		req, _ := http.NewRequest("GET", "/api/clients", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -150,7 +260,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("GET /api/clients - Success with regular user", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, regularUser)
+		token := createTestToken(t, cfg, authService, regularUser, records)
 
 		req, _ := http.NewRequest("GET", "/api/clients", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -172,7 +282,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("GET /api/clients/:id - Success", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, adminUser)
+		token := createTestToken(t, cfg, authService, adminUser, records)
 
 		// Create a test client first
 		clientService := services.NewClientService(cfg)
@@ -184,6 +294,7 @@ func TestClientsRoutes(t *testing.T) {
 		}
 		client, err := clientService.CreateClient(clientData)
 		require.NoError(t, err)
+		trackTestClient(client, records)
 
 		req, _ := http.NewRequest("GET", "/api/clients/"+strconv.FormatUint(uint64(client.ID), 10), nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -199,7 +310,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("GET /api/clients/:id - Not Found", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, adminUser)
+		token := createTestToken(t, cfg, authService, adminUser, records)
 
 		req, _ := http.NewRequest("GET", "/api/clients/99999", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -211,7 +322,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("GET /api/clients/:id - Invalid ID", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, adminUser)
+		token := createTestToken(t, cfg, authService, adminUser, records)
 
 		req, _ := http.NewRequest("GET", "/api/clients/invalid", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -223,7 +334,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("POST /api/clients - Success (admin)", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, adminUser)
+		token := createTestToken(t, cfg, authService, adminUser, records)
 
 		createRequest := map[string]interface{}{
 			"username":     "newclient",
@@ -244,11 +355,12 @@ func TestClientsRoutes(t *testing.T) {
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		assert.NoError(t, err)
 		assert.Equal(t, "newclient@example.com", response.Email)
+		trackTestClient(&response, records)
 	})
 
 	t.Run("POST /api/clients - Forbidden (regular user)", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, regularUser)
+		token := createTestToken(t, cfg, authService, regularUser, records)
 
 		createRequest := map[string]interface{}{
 			"username":     "newclient2",
@@ -269,7 +381,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("POST /api/clients - Bad Request (missing required fields)", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, adminUser)
+		token := createTestToken(t, cfg, authService, adminUser, records)
 
 		createRequest := map[string]interface{}{
 			"username": "newclient3",
@@ -288,7 +400,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("PUT /api/clients/:id - Success (admin)", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, adminUser)
+		token := createTestToken(t, cfg, authService, adminUser, records)
 
 		// Create a test client first
 		clientService := services.NewClientService(cfg)
@@ -300,6 +412,7 @@ func TestClientsRoutes(t *testing.T) {
 		}
 		client, err := clientService.CreateClient(clientData)
 		require.NoError(t, err)
+		trackTestClient(client, records)
 
 		updateRequest := map[string]interface{}{
 			"contact_name": "Updated Client Name",
@@ -323,7 +436,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("PUT /api/clients/:id - Forbidden (regular user)", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, regularUser)
+		token := createTestToken(t, cfg, authService, regularUser, records)
 
 		updateRequest := map[string]interface{}{
 			"contact_name": "Should Fail",
@@ -341,7 +454,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("PUT /api/clients/:id/limits - Success (admin)", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, adminUser)
+		token := createTestToken(t, cfg, authService, adminUser, records)
 
 		// Create a test client first
 		clientService := services.NewClientService(cfg)
@@ -353,6 +466,7 @@ func TestClientsRoutes(t *testing.T) {
 		}
 		client, err := clientService.CreateClient(clientData)
 		require.NoError(t, err)
+		trackTestClient(client, records)
 
 		updateLimitsRequest := map[string]interface{}{
 			"limit_web_domain":      10,
@@ -379,7 +493,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("PUT /api/clients/:id/limits - Forbidden (regular user)", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, regularUser)
+		token := createTestToken(t, cfg, authService, regularUser, records)
 
 		updateLimitsRequest := map[string]interface{}{
 			"limit_web_domain": 5,
@@ -397,7 +511,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("DELETE /api/clients/:id - Success (admin)", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, adminUser)
+		token := createTestToken(t, cfg, authService, adminUser, records)
 
 		// Create a test client first
 		clientService := services.NewClientService(cfg)
@@ -409,6 +523,7 @@ func TestClientsRoutes(t *testing.T) {
 		}
 		client, err := clientService.CreateClient(clientData)
 		require.NoError(t, err)
+		trackTestClient(client, records)
 
 		req, _ := http.NewRequest("DELETE", "/api/clients/"+strconv.FormatUint(uint64(client.ID), 10), nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -428,7 +543,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("DELETE /api/clients/:id - Forbidden (regular user)", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, regularUser)
+		token := createTestToken(t, cfg, authService, regularUser, records)
 
 		req, _ := http.NewRequest("DELETE", "/api/clients/1", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -440,7 +555,7 @@ func TestClientsRoutes(t *testing.T) {
 
 	t.Run("DELETE /api/clients/:id - Not Found", func(t *testing.T) {
 		router := setupTestRouter(cfg)
-		token := createTestToken(t, cfg, authService, adminUser)
+		token := createTestToken(t, cfg, authService, adminUser, records)
 
 		req, _ := http.NewRequest("DELETE", "/api/clients/99999", nil)
 		req.Header.Set("Authorization", "Bearer "+token)

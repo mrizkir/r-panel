@@ -1,6 +1,9 @@
 # R-Panel Configuration Example File
 # Copy this file to config.yaml and adjust settings
 
+# Environment: local (tests enabled), production (tests disabled)
+environment: "local" # local, production
+
 # Server settings
 server:
   host: "127.0.0.1"  # Listen on localhost (behind Nginx reverse proxy)
