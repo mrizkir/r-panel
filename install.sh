@@ -1191,16 +1191,39 @@ EOF
 create_temp_ssl_certificate() {
     local R_PANEL_DOMAIN="${SERVER_NAME:-panel.example.com}"
     local CERT_DIR="/etc/letsencrypt/live/${R_PANEL_DOMAIN}"
+    local CERT_FILE="${CERT_DIR}/fullchain.pem"
+    local KEY_FILE="${CERT_DIR}/privkey.pem"
+    
+    # Check if openssl is available
+    if ! command -v openssl &> /dev/null; then
+        log_error "OpenSSL is not installed. Cannot create SSL certificate."
+        log_error "Please install openssl: apt-get install openssl"
+        return 1
+    fi
     
     # Create directory structure
     mkdir -p "$CERT_DIR" >> "$LOG_FILE" 2>&1
     
-    # Check if certificate already exists
-    if [ -f "${CERT_DIR}/fullchain.pem" ] && [ -f "${CERT_DIR}/privkey.pem" ]; then
-        if [ "$VERBOSE_MODE" = true ]; then
-            log_info "SSL certificate already exists at ${CERT_DIR}"
+    # Verify directory was created
+    if [ ! -d "$CERT_DIR" ]; then
+        log_error "Failed to create certificate directory: $CERT_DIR"
+        return 1
+    fi
+    
+    # Check if certificate already exists and is valid
+    if [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ]; then
+        # Verify certificate is valid (not empty and readable)
+        if [ -s "$CERT_FILE" ] && [ -s "$KEY_FILE" ]; then
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_info "SSL certificate already exists at ${CERT_DIR}"
+            fi
+            return 0
+        else
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_warning "Existing certificate files are empty, recreating..."
+            fi
+            rm -f "$CERT_FILE" "$KEY_FILE" >> "$LOG_FILE" 2>&1
         fi
-        return 0
     fi
     
     if [ "$VERBOSE_MODE" = true ]; then
@@ -1208,20 +1231,48 @@ create_temp_ssl_certificate() {
     fi
     
     # Generate self-signed certificate valid for 365 days
+    # Use set +e to handle potential errors gracefully
+    set +e
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-        -keyout "${CERT_DIR}/privkey.pem" \
-        -out "${CERT_DIR}/fullchain.pem" \
+        -keyout "$KEY_FILE" \
+        -out "$CERT_FILE" \
         -subj "/C=US/ST=State/L=City/O=Organization/CN=${R_PANEL_DOMAIN}" \
         >> "$LOG_FILE" 2>&1
+    local openssl_result=$?
+    set -e
+    
+    if [ $openssl_result -ne 0 ]; then
+        log_error "Failed to create SSL certificate. OpenSSL error code: $openssl_result"
+        log_error "Check if openssl is installed: apt-get install openssl"
+        return 1
+    fi
+    
+    # Verify certificate files were created
+    if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
+        log_error "Certificate files were not created successfully"
+        log_error "Expected: $CERT_FILE and $KEY_FILE"
+        return 1
+    fi
+    
+    # Verify files are not empty
+    if [ ! -s "$CERT_FILE" ] || [ ! -s "$KEY_FILE" ]; then
+        log_error "Certificate files are empty"
+        return 1
+    fi
     
     # Set proper permissions
-    chmod 600 "${CERT_DIR}/privkey.pem" >> "$LOG_FILE" 2>&1
-    chmod 644 "${CERT_DIR}/fullchain.pem" >> "$LOG_FILE" 2>&1
+    chmod 600 "$KEY_FILE" >> "$LOG_FILE" 2>&1
+    chmod 644 "$CERT_FILE" >> "$LOG_FILE" 2>&1
     
+    # Verify permissions were set correctly
     if [ "$VERBOSE_MODE" = true ]; then
-        log_success "Temporary self-signed SSL certificate created"
+        log_success "Temporary self-signed SSL certificate created at ${CERT_DIR}"
+        log_info "Certificate: $CERT_FILE"
+        log_info "Private key: $KEY_FILE"
         log_info "Note: Replace with Let's Encrypt certificate using: certbot --nginx -d ${R_PANEL_DOMAIN}"
     fi
+    
+    return 0
 }
 
 # Create Nginx configuration for R-Panel reverse proxy
@@ -1236,6 +1287,110 @@ create_rpanel_nginx_config() {
     # Create temporary self-signed certificate first (so nginx can start with SSL)
     # This will be replaced by Let's Encrypt certificate if available
     create_temp_ssl_certificate
+    
+    # Verify certificate files exist before creating nginx config
+    local CERT_DIR="/etc/letsencrypt/live/${R_PANEL_DOMAIN}"
+    local CERT_FILE="${CERT_DIR}/fullchain.pem"
+    local KEY_FILE="${CERT_DIR}/privkey.pem"
+    
+    # Check if certificate files exist and are valid
+    if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
+        log_error "SSL certificate files not found at ${CERT_DIR}"
+        log_error "Certificate creation may have failed. Attempting to create again..."
+        
+        # Try to create certificate one more time
+        if ! create_temp_ssl_certificate; then
+            log_error "Failed to create SSL certificate. Creating HTTP-only configuration..."
+            log_warning "SSL will not be available. You can add SSL later by running: certbot --nginx -d ${R_PANEL_DOMAIN}"
+            
+            # Create HTTP-only config as fallback
+            cat > /etc/nginx/sites-available/r-panel <<EOF
+# HTTP server (SSL not available - certificate creation failed)
+server {
+    listen 8080;
+    listen [::]:8080;
+    server_name _;
+
+    # Logging
+    access_log /var/log/nginx/r-panel-access.log;
+    error_log /var/log/nginx/r-panel-error.log;
+
+    # Increase body size for file uploads
+    client_max_body_size 100M;
+    client_body_buffer_size 128k;
+
+    # Proxy to backend Go application
+    location / {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        
+        # Essential headers
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        
+        # WebSocket support
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+        
+        # Buffering
+        proxy_buffering off;
+        proxy_request_buffering off;
+        
+        # Don't pass these headers
+        proxy_set_header Accept-Encoding "";
+    }
+
+    # Health check endpoint
+    location /health {
+        access_log off;
+        proxy_pass http://127.0.0.1:8081/health;
+        proxy_set_header Host \$host;
+    }
+
+    # Static files caching
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)$ {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host \$host;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+}
+EOF
+            # Enable the site and test
+            set +e
+            ln -sf /etc/nginx/sites-available/r-panel /etc/nginx/sites-enabled/r-panel 2>> "$LOG_FILE" || true
+            nginx -t >> "$LOG_FILE" 2>&1
+            local nginx_test_result=$?
+            set -e
+            
+            if [ $nginx_test_result -eq 0 ]; then
+                systemctl reload nginx >> "$LOG_FILE" 2>&1 || true
+                if [ "$VERBOSE_MODE" = true ]; then
+                    log_warning "R-Panel configured with HTTP only (SSL certificate creation failed)"
+                fi
+            fi
+            return 0
+        fi
+    fi
+    
+    # Verify files are not empty
+    if [ ! -s "$CERT_FILE" ] || [ ! -s "$KEY_FILE" ]; then
+        log_error "Certificate files are empty. Recreating..."
+        rm -f "$CERT_FILE" "$KEY_FILE" >> "$LOG_FILE" 2>&1
+        if ! create_temp_ssl_certificate; then
+            log_error "Failed to recreate certificate. See error above."
+            return 1
+        fi
+    fi
     
     # Create Nginx config for R-Panel
     # SSL support is enabled by default - certificate will be setup by certbot

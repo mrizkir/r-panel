@@ -63,7 +63,10 @@ Born from real-world production experience managing servers, R-Panel provides an
 
 ### 🌐 Nginx Management
 - **Virtual host management** - Add/edit/delete server blocks
-- **SSL/TLS support** - Let's Encrypt integration ready
+- **SSL/TLS support** - HTTPS enabled by default with automatic certificate management
+- **Multi-domain SSL** - Automatic SSL for multiple domains via SNI (Server Name Indication)
+- **Let's Encrypt integration** - Automatic certificate generation and renewal
+- **Self-signed fallback** - Temporary certificates created automatically during installation
 - **PHP-FPM integration** - Automatic pool assignment
 - **Access & error logs** - Built-in log viewer
 - **Configuration validator** - Test nginx config before reload
@@ -83,6 +86,12 @@ Born from real-world production experience managing servers, R-Panel provides an
 - **Retention policies** - Auto-delete old backups
 - **One-click restore** - Restore from backup archive
 - **Remote storage** - Support for S3/SFTP (coming soon)
+
+### 💿 Disk & Resource Management
+- **Disk quota** - Set quotas for users and groups
+- **Quota management** - Easy quota configuration via CLI tools
+- **Swap management** - Automatic swap file creation (2GB default)
+- **Resource monitoring** - Track disk usage and quotas
 
 ### 📜 System Logs
 - **Real-time log viewer** - Tail logs in browser
@@ -105,7 +114,7 @@ Born from real-world production experience managing servers, R-Panel provides an
 - **[Go 1.21+](https://go.dev/)** - High-performance compiled language
 - **[Gin Framework](https://gin-gonic.com/)** - Blazing fast HTTP framework
 - **JWT Authentication** - Secure stateless authentication
-- **SQLite/MySQL** - Lightweight database options
+- **MySQL** - Lightweight database options
 
 ### Frontend
 - **Vanilla JavaScript** - No heavy frameworks
@@ -116,10 +125,12 @@ Born from real-world production experience managing servers, R-Panel provides an
 - **[Vite](https://vitejs.dev/)** - Fast build tool with minification
 
 ### System Requirements
-- **OS**: Ubuntu Server 22.04 LTS or higher
+- **OS**: Ubuntu Server 22.04 LTS or higher (Debian-based systems supported)
 - **RAM**: 512MB minimum (1GB recommended)
 - **Disk**: 500MB for R-Panel + space for data
-- **Services**: Nginx, PHP-FPM, MySQL/MariaDB (optional)
+- **Swap**: Automatically created (2GB) if not present
+- **Services**: Nginx, PHP-FPM, MySQL/MariaDB (installed automatically)
+- **SSL**: OpenSSL for certificate generation
 
 ---
 
@@ -142,8 +153,12 @@ sudo apt install -y nginx mysql-server php8.1-fpm php8.1-mysql \
 curl -fsSL https://raw.githubusercontent.com/rizkiromdoni/r-panel/main/install.sh | sudo bash
 
 # 2. Access R-Panel
-# http://your-server-ip:8080
+# HTTPS is enabled by default (self-signed certificate)
+# https://your-server-ip:8080
+# https://your-domain.com:8080 (if DNS configured)
 # Default: admin / changeme
+# 
+# Note: HTTP will automatically redirect to HTTPS
 ```
 
 ### Debug Installation (Troubleshooting)
@@ -222,16 +237,38 @@ sudo systemctl daemon-reload
 sudo systemctl enable rpanel
 sudo systemctl start rpanel
 
-# 4. Setup Nginx reverse proxy (optional)
+# 4. Setup Nginx reverse proxy with SSL (automatically configured by installer)
+# The installer automatically:
+# - Creates HTTPS server block on port 8080
+# - Generates self-signed certificate
+# - Configures automatic redirect from HTTP to HTTPS
+# - Supports multiple domains via SNI
+#
+# To upgrade to Let's Encrypt certificate:
+# certbot --nginx -d panel.yourdomain.com
+#
+# Manual Nginx config (if not using installer):
 sudo tee /etc/nginx/sites-available/rpanel > /dev/null <<EOF
+# HTTP redirect to HTTPS
 server {
-    listen 80;
-    server_name panel.yourdomain.com;
+    listen 8080;
+    server_name _;
+    return 301 https://\$host\$request_uri;
+}
 
+# HTTPS server
+server {
+    listen 8080 ssl http2;
+    server_name _;
+    
+    ssl_certificate /etc/letsencrypt/live/panel.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/panel.yourdomain.com/privkey.pem;
+    
     location / {
-        proxy_pass http://localhost:8080;
+        proxy_pass http://127.0.0.1:8081;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 EOF
@@ -246,10 +283,14 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ### First Login
 ```
-1. Access http://your-server-ip:8080
-2. Login with: admin / changeme
-3. IMMEDIATELY change password in Settings → Profile
-4. Create additional users if needed
+1. Access https://your-server-ip:8080 or https://your-domain.com:8080
+   (HTTP will automatically redirect to HTTPS)
+2. Accept the self-signed certificate warning (browser security prompt)
+   - This is normal during initial setup
+   - Let's Encrypt certificate will replace it automatically if DNS is configured
+3. Login with: admin / changeme
+4. IMMEDIATELY change password in Settings → Profile
+5. Create additional users if needed
 ```
 
 ### Managing PHP-FPM Pools
@@ -270,9 +311,29 @@ sudo nginx -t && sudo systemctl reload nginx
 3. Enter domain (e.g., example.com)
 4. Set document root (e.g., /var/www/example.com)
 5. Select PHP-FPM pool
-6. Enable/configure SSL if needed
+6. SSL is automatically configured for R-Panel on port 8080
 7. Save and test nginx configuration
 8. Reload Nginx
+```
+
+### SSL Certificate Management
+```
+R-Panel automatically handles SSL certificates:
+
+1. During installation:
+   - Self-signed certificate is created automatically
+   - HTTPS is enabled by default on port 8080
+   - HTTP automatically redirects to HTTPS
+
+2. For Let's Encrypt certificate:
+   - Ensure DNS points to your server
+   - Run: certbot --nginx -d your-domain.com
+   - Certificate will automatically replace self-signed cert
+
+3. Multiple domains:
+   - Each domain accessing port 8080 gets SSL automatically
+   - SNI (Server Name Indication) handles domain-specific certificates
+   - Example: https://client1.com:8080, https://client2.org:8080
 ```
 
 ### Database Management
@@ -348,11 +409,12 @@ R-Panel follows security best practices:
 
 **Security Recommendations:**
 - Change default password immediately
-- Use HTTPS (Let's Encrypt certificate)
+- HTTPS is enabled by default - upgrade to Let's Encrypt certificate when DNS is ready
 - Restrict panel access by IP (firewall rules)
 - Keep system and R-Panel updated
 - Regular security audits
 - Use strong passwords (12+ characters)
+- SSL certificates are automatically managed - self-signed during install, Let's Encrypt when available
 
 ---
 
@@ -386,7 +448,12 @@ yarn dev
 - [x] Nginx vhost management
 - [x] MySQL database management
 - [x] Backup system
-- [ ] Let's Encrypt SSL automation
+- [x] SSL/TLS support with automatic certificate management
+- [x] Multi-domain SSL support via SNI
+- [x] Self-signed certificate fallback
+- [x] Disk quota management
+- [x] Automatic swap creation
+- [ ] Let's Encrypt automatic renewal UI
 - [ ] Firewall (UFW) management
 - [ ] Cron job manager
 - [ ] File manager
@@ -411,8 +478,8 @@ See [LICENSE](LICENSE) file for details.
 
 **Mochammad Rizki Romdoni**
 
-- GitHub: [@rizkiromdoni](https://github.com/rizkiromdoni)
-- Server: [elearning.sttindonesia.ac.id](https://elearning.sttindonesia.ac.id)
+- GitHub: [@mrizkir](https://github.com/mrizkir)
+- Server: [dev.yacanet.com](https://dev.yacanet.com)
 
 ---
 
